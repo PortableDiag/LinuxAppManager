@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4 — 2026-07-19
+
+- **Public-only auth** — App Manager never reads your `gh` login; it uses the
+  anonymous public API by default. A token is sent only from an explicit
+  `$GITHUB_TOKEN`/`$GH_TOKEN` env var (opt-in). Follow-user lists public repos.
+- **Method-agnostic install detection** — an app is detected however it was
+  installed (dpkg, `~/.local/bin`, `~/Applications`, `$PATH`, or a custom
+  `install_path`), regardless of its declared `kind`.
+- **AppImage** detection honors a custom `install_path` and reports a present
+  AppImage as installed even without a sidecar (matches `bin`).
+
 ## 0.1.3 — 2026-07-19
 
 - **Quick add** — ＋ Add takes a single GitHub repo/URL and auto-detects the
