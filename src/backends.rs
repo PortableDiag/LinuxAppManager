@@ -62,11 +62,17 @@ pub fn detect_installed(src: &Source) -> Option<String> {
             (!v.is_empty()).then_some(v)
         }
         Kind::AppImage => {
-            let sidecar = version_sidecar(src);
-            std::fs::read_to_string(sidecar)
+            // Recorded version, else "unknown" if the AppImage is present but
+            // we didn't install it (matches bin behaviour).
+            std::fs::read_to_string(version_sidecar(src))
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    appimage_path(src)
+                        .exists()
+                        .then(|| crate::model::UNKNOWN_VERSION.to_string())
+                })
         }
         Kind::Bin => {
             if !bin_path(src).exists() {
@@ -275,8 +281,13 @@ fn write_desktop(src: &Source, exec: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Where an AppImage lives: a custom `install_path` if set, else
+/// ~/Applications/<id>.AppImage.
 fn appimage_path(src: &Source) -> PathBuf {
-    config::appimage_dir().join(format!("{}.AppImage", src.id))
+    match &src.install_path {
+        Some(p) if !p.trim().is_empty() => expand_tilde(p.trim()),
+        _ => config::appimage_dir().join(format!("{}.AppImage", src.id)),
+    }
 }
 
 fn version_sidecar(src: &Source) -> PathBuf {
