@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.2 — 2026-07-19
+
+- **Follow a GitHub user** — enumerate an account's repos (your own private ones
+  too, via your token) and auto-add those with a release installable on this
+  host; kind auto-detected. `▾ menu > Follow GitHub user…` / `--follow-user`.
+- **Architecture-aware asset selection** — picks the host-arch `.deb`/`.AppImage`
+  (was taking the first, e.g. arm64 on x86_64).
+- **Edit / Remove from list** on each app; **Uninstall** relabelled (distinct
+  from removing the source entry).
+- **Custom install path** for `bin` apps — track/update a binary in any location
+  (leading `~/` expands), not just `~/.local/bin`.
+- **App icon + .desktop + `scripts/install.sh`** for a proper menu install.
+- Honest **"version unknown"** display for self-built binaries (no phantom update
+  arrow); **no "Open"** on App Manager's own entry.
+
 ## 0.1.1 — 2026-07-19
 
 - **App detail page** — clicking a row pushes a page with the description,
