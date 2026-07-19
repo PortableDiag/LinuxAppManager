@@ -63,6 +63,33 @@ fn github_latest(src: &Source, repo: &str) -> Result<Option<Latest>> {
     }))
 }
 
+/// Parse a config document into sources. Accepts either a bare array (the live
+/// sources.json form) or a `{ "version", "sources": [...] }` envelope (export /
+/// official form); extra keys are ignored.
+pub fn parse_config(text: &str) -> Result<Vec<Source>> {
+    let v: serde_json::Value = serde_json::from_str(text)?;
+    let arr = if v.is_array() { v } else { v["sources"].clone() };
+    Ok(serde_json::from_value(arr)?)
+}
+
+/// Fetch the curated official list from the repo (works for a private repo via
+/// the API's raw media type + the user's token).
+pub fn fetch_official() -> Result<Vec<Source>> {
+    let url = format!(
+        "https://api.github.com/repos/{}/contents/{}",
+        config::OFFICIAL_REPO,
+        config::OFFICIAL_PATH
+    );
+    let mut req = ureq::get(&url)
+        .set("User-Agent", "LinuxAppManager")
+        .set("Accept", "application/vnd.github.raw+json");
+    if let Some(token) = github_token() {
+        req = req.set("Authorization", &format!("Bearer {token}"));
+    }
+    let text = req.call()?.into_string()?;
+    parse_config(&text)
+}
+
 /// A GitHub token for private-repo access: `$GITHUB_TOKEN` / `$GH_TOKEN`, else
 /// whatever `gh auth token` reports. `None` if the user has no gh login.
 fn github_token() -> Option<String> {

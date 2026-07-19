@@ -2,7 +2,11 @@
 
 use crate::model::Source;
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// The repo (and file within it) that serves the curated "official" list.
+pub const OFFICIAL_REPO: &str = "PortableDiag/LinuxAppManager";
+pub const OFFICIAL_PATH: &str = "official-config.json";
 
 /// ~/.config/linux-app-manager
 pub fn config_dir() -> PathBuf {
@@ -59,6 +63,45 @@ pub fn load_sources() -> Result<Vec<Source>> {
     }
     let data = std::fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&data)?)
+}
+
+/// Overwrite the live source list.
+pub fn save_sources(srcs: &[Source]) -> Result<()> {
+    std::fs::create_dir_all(config_dir())?;
+    std::fs::write(sources_path(), serde_json::to_string_pretty(srcs)?)?;
+    Ok(())
+}
+
+/// Merge incoming sources into existing, matching on `id` (incoming wins).
+/// Returns the merged list plus (added, updated) counts.
+pub fn merge(existing: &[Source], incoming: Vec<Source>) -> (Vec<Source>, usize, usize) {
+    let mut out = existing.to_vec();
+    let (mut added, mut updated) = (0, 0);
+    for s in incoming {
+        match out.iter().position(|e| e.id == s.id) {
+            Some(pos) => {
+                out[pos] = s;
+                updated += 1;
+            }
+            None => {
+                out.push(s);
+                added += 1;
+            }
+        }
+    }
+    (out, added, updated)
+}
+
+/// Write a shareable config file: the same `{version, sources}` envelope the
+/// official list uses, so an export can be dropped straight into the repo.
+pub fn export_config(srcs: &[Source], dest: &Path) -> Result<()> {
+    let doc = serde_json::json!({
+        "_comment": "Linux App Manager config. Import via the header ▾ menu. Only 'sources' is read.",
+        "version": 1,
+        "sources": srcs,
+    });
+    std::fs::write(dest, serde_json::to_string_pretty(&doc)?)?;
+    Ok(())
 }
 
 /// The manager ships in its own list, exactly like the Android App Manager.

@@ -1,0 +1,22 @@
+{
+  "_comment": "Official Linux App Manager list. Served raw from the repo and pulled by the header ▾ menu > Import official list. Same schema as an Export file: only 'sources' is read, anything else is ignored. Edit this to change the recommended apps shipped to users.",
+  "version": 1,
+  "sources": [
+    {
+      "id": "com.procomputation.LinuxAppManager",
+      "name": "App Manager",
+      "description": "This app. Manages itself.",
+      "kind": "bin",
+      "package": "linux-app-manager",
+      "origin": { "type": "github", "repo": "PortableDiag/LinuxAppManager" }
+    },
+    {
+      "id": "com.procomputation.Gapless",
+      "name": "Gapless",
+      "description": "Gapless music player (Rust/GStreamer/GTK4).",
+      "kind": "bin",
+      "package": "gapless",
+      "origin": { "type": "github", "repo": "PortableDiag/gapless" }
+    }
+  ]
+}

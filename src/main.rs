@@ -13,7 +13,8 @@ mod sources;
 // adw's prelude re-exports gtk's, so we don't import gtk::prelude separately.
 use adw::prelude::*;
 use catalog::{Entry, Status};
-use gtk::glib;
+use model::{Kind, Origin, Source};
+use gtk::{gio, glib};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -23,6 +24,7 @@ const APP_ID: &str = "com.procomputation.LinuxAppManager";
 struct Ui {
     window: adw::ApplicationWindow,
     list: gtk::ListBox,
+    toasts: adw::ToastOverlay,
     /// Guards against overlapping refreshes.
     busy: RefCell<bool>,
 }
@@ -63,16 +65,27 @@ fn build_ui(app: &adw::Application) {
         .child(&clamp)
         .build();
 
+    let toasts = adw::ToastOverlay::new();
+    toasts.set_child(Some(&scroller));
+
     let refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh_btn.set_tooltip_text(Some("Refresh"));
+    let add_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_btn.set_tooltip_text(Some("Add app"));
+    let menu_btn = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Import / export")
+        .build();
 
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&adw::WindowTitle::new("App Manager", "")));
     header.pack_start(&refresh_btn);
+    header.pack_end(&menu_btn);
+    header.pack_end(&add_btn);
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&scroller));
+    toolbar.set_content(Some(&toasts));
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -85,14 +98,53 @@ fn build_ui(app: &adw::Application) {
     let ui = Rc::new(Ui {
         window: window.clone(),
         list,
+        toasts,
         busy: RefCell::new(false),
     });
 
     let ui_btn = ui.clone();
     refresh_btn.connect_clicked(move |_| refresh(ui_btn.clone()));
+    let ui_add = ui.clone();
+    add_btn.connect_clicked(move |_| add_source_dialog(&ui_add));
+    menu_btn.set_popover(Some(&import_export_menu(&ui)));
 
     window.present();
     refresh(ui);
+}
+
+/// Popover with import/export actions for the header ▾ menu.
+fn import_export_menu(ui: &Rc<Ui>) -> gtk::Popover {
+    let pop = gtk::Popover::new();
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    vbox.set_margin_top(6);
+    vbox.set_margin_bottom(6);
+    vbox.set_margin_start(6);
+    vbox.set_margin_end(6);
+
+    let items: [(&str, fn(Rc<Ui>)); 3] = [
+        ("Import official list", import_official),
+        ("Import from file…", import_file),
+        ("Export config…", export_file),
+    ];
+    for (label, action) in items {
+        let btn = gtk::Button::builder()
+            .label(label)
+            .css_classes(["flat"])
+            .halign(gtk::Align::Fill)
+            .build();
+        if let Some(child) = btn.child().and_downcast::<gtk::Label>() {
+            child.set_xalign(0.0);
+        }
+        let ui = ui.clone();
+        let pop2 = pop.clone();
+        btn.connect_clicked(move |_| {
+            pop2.popdown();
+            action(ui.clone());
+        });
+        vbox.append(&btn);
+    }
+    pop.set_child(Some(&vbox));
+    pop
 }
 
 /// Rebuild the catalog off-thread and repopulate the list.
@@ -235,9 +287,150 @@ fn status_row(text: &str) -> gtk::ListBoxRow {
 }
 
 fn toast(ui: &Rc<Ui>, text: &str) {
-    // Minimal: a transient message dialog. (A proper AdwToastOverlay is a
-    // later polish item.)
-    let dialog = adw::MessageDialog::new(Some(&ui.window), Some("App Manager"), Some(text));
-    dialog.add_response("ok", "OK");
+    ui.toasts.add_toast(adw::Toast::new(text));
+}
+
+// --- add source ------------------------------------------------------------
+
+/// Dialog to add one app: name, GitHub repo, executable/package, and kind.
+fn add_source_dialog(ui: &Rc<Ui>) {
+    let dialog = adw::MessageDialog::new(Some(&ui.window), Some("Add app"), None);
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("add", "Add");
+    dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("add"));
+    dialog.set_close_response("cancel");
+
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let name_e = gtk::Entry::builder().placeholder_text("Name").build();
+    let repo_e = gtk::Entry::builder()
+        .placeholder_text("GitHub owner/repo")
+        .build();
+    let pkg_e = gtk::Entry::builder()
+        .placeholder_text("Executable / package name")
+        .build();
+    let kind_dd = gtk::DropDown::from_strings(&["bin", "appimage", "deb"]);
+    for w in [name_e.upcast_ref::<gtk::Widget>(), repo_e.upcast_ref(), pkg_e.upcast_ref()] {
+        w.set_hexpand(true);
+    }
+    form.append(&name_e);
+    form.append(&repo_e);
+    form.append(&pkg_e);
+    form.append(&kind_dd);
+    dialog.set_extra_child(Some(&form));
+
+    let ui = ui.clone();
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "add" {
+            return;
+        }
+        let name = name_e.text().trim().to_string();
+        let repo = normalize_repo(&repo_e.text());
+        let pkg = pkg_e.text().trim().to_string();
+        if name.is_empty() || repo.is_empty() {
+            toast(&ui, "Name and GitHub repo are required");
+            return;
+        }
+        let kind = match kind_dd.selected() {
+            1 => Kind::AppImage,
+            2 => Kind::Deb,
+            _ => Kind::Bin,
+        };
+        let id = if pkg.is_empty() { slug(&name) } else { pkg.clone() };
+        let src = Source {
+            id,
+            name,
+            description: None,
+            kind,
+            package: (!pkg.is_empty()).then_some(pkg),
+            origin: Origin::Github { repo },
+        };
+        apply_import(ui.clone(), vec![src]);
+    });
     dialog.present();
+}
+
+// --- import / export -------------------------------------------------------
+
+/// Merge sources into the live list, save, refresh, and report the result.
+fn apply_import(ui: Rc<Ui>, incoming: Vec<Source>) {
+    let existing = config::load_sources().unwrap_or_default();
+    let (merged, added, updated) = config::merge(&existing, incoming);
+    match config::save_sources(&merged) {
+        Ok(()) => {
+            toast(&ui, &format!("Imported · {added} added, {updated} updated"));
+            refresh(ui);
+        }
+        Err(e) => toast(&ui, &format!("Save failed: {e}")),
+    }
+}
+
+fn import_official(ui: Rc<Ui>) {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(sources::fetch_official());
+    });
+    glib::spawn_future_local(async move {
+        match rx.recv().await {
+            Ok(Ok(list)) => apply_import(ui, list),
+            Ok(Err(e)) => toast(&ui, &format!("Import failed: {e}")),
+            Err(_) => {}
+        }
+    });
+}
+
+fn import_file(ui: Rc<Ui>) {
+    let dialog = gtk::FileDialog::builder().title("Import config").build();
+    let win = ui.window.clone();
+    dialog.open(Some(&win), gio::Cancellable::NONE, move |res| {
+        let Ok(file) = res else { return };
+        let Some(path) = file.path() else { return };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match sources::parse_config(&text) {
+                Ok(list) => apply_import(ui.clone(), list),
+                Err(e) => toast(&ui, &format!("Bad config: {e}")),
+            },
+            Err(e) => toast(&ui, &format!("Read failed: {e}")),
+        }
+    });
+}
+
+fn export_file(ui: Rc<Ui>) {
+    let dialog = gtk::FileDialog::builder()
+        .title("Export config")
+        .initial_name("linux-app-manager-config.json")
+        .build();
+    let win = ui.window.clone();
+    dialog.save(Some(&win), gio::Cancellable::NONE, move |res| {
+        let Ok(file) = res else { return };
+        let Some(path) = file.path() else { return };
+        let srcs = config::load_sources().unwrap_or_default();
+        match config::export_config(&srcs, &path) {
+            Ok(()) => toast(&ui, "Config exported"),
+            Err(e) => toast(&ui, &format!("Export failed: {e}")),
+        }
+    });
+}
+
+/// "https://github.com/owner/repo/" → "owner/repo".
+fn normalize_repo(s: &str) -> String {
+    s.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("github.com/")
+        .trim_matches('/')
+        .to_string()
+}
+
+/// A filesystem/id-safe slug from a display name.
+fn slug(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        out.push(if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            '-'
+        });
+    }
+    out.trim_matches('-').to_string()
 }
