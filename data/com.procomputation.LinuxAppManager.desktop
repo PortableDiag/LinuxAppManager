@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=App Manager
+Comment=Manage and update your own Linux apps
+Exec=linux-app-manager
+Icon=com.procomputation.LinuxAppManager
+Terminal=false
+Categories=System;Utility;PackageManager;
+Keywords=apps;install;update;manager;sideload;
+StartupNotify=true

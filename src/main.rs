@@ -166,6 +166,9 @@ fn print_usage() {
 }
 
 fn build_ui(app: &adw::Application) {
+    // Use the app-id icon (installed under hicolor/scalable/apps) for windows.
+    gtk::Window::set_default_icon_name(APP_ID);
+
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .build();
