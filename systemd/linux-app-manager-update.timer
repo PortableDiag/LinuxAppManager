@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Linux App Manager auto-update check
+
+[Timer]
+OnCalendar=daily
+# Catch up if the machine was off at the scheduled time.
+Persistent=true
+# Spread load / avoid a thundering herd on GitHub.
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Linux App Manager — auto-update flagged apps
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Optional: drop GITHUB_TOKEN=... here if the gh keyring isn't unlocked in the
+# background session (needed for private repos). The leading '-' makes it
+# non-fatal when the file is absent.
+EnvironmentFile=-%h/.config/linux-app-manager/env
+ExecStart=%h/.local/bin/linux-app-manager --auto-update

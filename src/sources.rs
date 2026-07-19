@@ -42,9 +42,12 @@ fn github_latest(src: &Source, repo: &str) -> Result<Option<Latest>> {
     let assets = json["assets"].as_array().cloned().unwrap_or_default();
     let asset = pick_asset(&assets, src);
 
+    // Use the asset *API* URL (api.github.com/.../releases/assets/{id}) rather
+    // than browser_download_url: it accepts a token, so private-repo assets
+    // download. See backends::download for the octet-stream + redirect dance.
     let (download_url, size) = match &asset {
         Some(a) => (
-            a["browser_download_url"].as_str().unwrap_or("").to_string(),
+            a["url"].as_str().unwrap_or("").to_string(),
             a["size"].as_u64(),
         ),
         None => (String::new(), None),
@@ -92,7 +95,7 @@ pub fn fetch_official() -> Result<Vec<Source>> {
 
 /// A GitHub token for private-repo access: `$GITHUB_TOKEN` / `$GH_TOKEN`, else
 /// whatever `gh auth token` reports. `None` if the user has no gh login.
-fn github_token() -> Option<String> {
+pub fn github_token() -> Option<String> {
     for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
         if let Ok(t) = std::env::var(var) {
             if !t.trim().is_empty() {

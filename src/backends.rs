@@ -110,15 +110,47 @@ pub fn open(src: &Source) -> Result<()> {
 
 fn download(src: &Source, latest: &Latest) -> Result<PathBuf> {
     let dest = config::cache_dir().join(format!("{}{}", src.id, src.kind.ext()));
+    let url = &latest.download_url;
     // A local file:// source needs no download.
-    if let Some(path) = latest.download_url.strip_prefix("file://") {
+    if let Some(path) = url.strip_prefix("file://") {
         return Ok(PathBuf::from(path));
     }
-    let resp = ureq::get(&latest.download_url)
-        .set("User-Agent", "LinuxAppManager")
-        .call()
-        .context("download request failed")?;
-    let mut reader = resp.into_reader();
+
+    let mut reader: Box<dyn std::io::Read + Send> =
+        if url.starts_with("https://api.github.com/") {
+            // Authenticated release-asset download. Ask for the raw bytes with
+            // the token, but DON'T auto-follow: the 302 points at a pre-signed
+            // URL that rejects a stray Authorization header, so we fetch the
+            // Location ourselves, unauthenticated.
+            let agent = ureq::builder().redirects(0).build();
+            let mut req = agent
+                .get(url)
+                .set("User-Agent", "LinuxAppManager")
+                .set("Accept", "application/octet-stream");
+            if let Some(token) = crate::sources::github_token() {
+                req = req.set("Authorization", &format!("Bearer {token}"));
+            }
+            let resp = req.call().context("asset request failed")?;
+            match resp.header("Location") {
+                Some(loc) => Box::new(
+                    ureq::get(loc)
+                        .set("User-Agent", "LinuxAppManager")
+                        .call()
+                        .context("asset redirect failed")?
+                        .into_reader(),
+                ),
+                None => Box::new(resp.into_reader()),
+            }
+        } else {
+            Box::new(
+                ureq::get(url)
+                    .set("User-Agent", "LinuxAppManager")
+                    .call()
+                    .context("download request failed")?
+                    .into_reader(),
+            )
+        };
+
     let mut out = std::fs::File::create(&dest)?;
     std::io::copy(&mut reader, &mut out)?;
     Ok(dest)
