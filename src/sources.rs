@@ -354,10 +354,70 @@ fn detect_installable(repo: &str, exec: &str) -> Option<Kind> {
     None
 }
 
+/// Build a Source from a pasted GitHub repo or URL, auto-detecting name,
+/// description, and installable kind. Falls back to `bin` when no installable
+/// release asset is found (the user can Edit… to adjust).
+pub fn resolve_repo(input: &str) -> Result<Source> {
+    let repo = parse_repo(input)
+        .ok_or_else(|| anyhow::anyhow!("not a GitHub owner/repo or URL"))?;
+    let info = gh_get(&format!("https://api.github.com/repos/{repo}"))?;
+    let name = info["name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| repo.rsplit('/').next().unwrap_or(&repo).to_string());
+    let description = info["description"].as_str().map(str::to_string);
+    let kind = detect_installable(&repo, &name).unwrap_or(Kind::Bin);
+    Ok(Source {
+        id: name.clone(),
+        name: name.clone(),
+        description,
+        kind,
+        package: Some(name.clone()),
+        install_path: None,
+        origin: Origin::Github { repo },
+        auto_update: false,
+    })
+}
+
+/// Extract `owner/repo` from a URL or bare `owner/repo` string.
+fn parse_repo(input: &str) -> Option<String> {
+    let s = input
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.")
+        .trim_start_matches("github.com/")
+        .trim_start_matches('/');
+    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    (parts.len() >= 2).then(|| format!("{}/{}", parts[0], parts[1]))
+}
+
+/// GET a GitHub API endpoint as JSON, with the user's token if available.
+fn gh_get(url: &str) -> Result<serde_json::Value> {
+    let mut req = ureq::get(url)
+        .set("User-Agent", "LinuxAppManager")
+        .set("Accept", "application/vnd.github+json");
+    if let Some(t) = github_token() {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    Ok(req.call()?.into_json()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{Kind, Origin, Source};
+
+    #[test]
+    fn parses_repo_forms() {
+        assert_eq!(parse_repo("owner/repo").as_deref(), Some("owner/repo"));
+        assert_eq!(parse_repo("https://github.com/owner/repo").as_deref(), Some("owner/repo"));
+        assert_eq!(
+            parse_repo("github.com/owner/repo/releases/tag/v1").as_deref(),
+            Some("owner/repo")
+        );
+        assert_eq!(parse_repo("just-a-word"), None);
+    }
 
     fn assets(names: &[&str]) -> Vec<serde_json::Value> {
         names

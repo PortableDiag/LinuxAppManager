@@ -85,6 +85,13 @@ fn run_cli() -> Option<glib::ExitCode> {
                 glib::ExitCode::FAILURE
             }
         }
+        "--add" => match args.get(1) {
+            Some(input) => cli_import(sources::resolve_repo(input).map(|s| vec![s])),
+            None => {
+                eprintln!("--add needs a GitHub repo or URL");
+                glib::ExitCode::FAILURE
+            }
+        },
         "--follow-user" => match args.get(1) {
             Some(user) => cli_import(sources::follow_user(user)),
             None => {
@@ -164,6 +171,7 @@ fn print_usage() {
          USAGE:\n  \
          linux-app-manager                 launch the GUI\n  \
          linux-app-manager --list          print the catalog (installed vs latest)\n  \
+         linux-app-manager --add <repo>    add one GitHub repo/URL (auto-detected)\n  \
          linux-app-manager --auto-update   install pending updates for auto-update apps\n  \
          linux-app-manager --follow-user <u>   add a GitHub user's installable repos\n  \
          linux-app-manager --import-official   merge the repo's official list\n  \
@@ -248,7 +256,7 @@ fn build_ui(app: &adw::Application) {
     let ui_btn = ui.clone();
     refresh_btn.connect_clicked(move |_| refresh(ui_btn.clone()));
     let ui_add = ui.clone();
-    add_btn.connect_clicked(move |_| source_dialog(&ui_add, None));
+    add_btn.connect_clicked(move |_| add_url_dialog(&ui_add));
     menu_btn.set_popover(Some(&import_export_menu(&ui)));
 
     // Row click → push that app's detail page.
@@ -707,6 +715,56 @@ fn toast(ui: &Rc<Ui>, text: &str) {
 }
 
 // --- add / edit source -----------------------------------------------------
+
+/// Quick add: paste a GitHub repo/URL and let App Manager fill in the rest.
+/// "Manual…" falls through to the full form for edge cases.
+fn add_url_dialog(ui: &Rc<Ui>) {
+    let dialog = adw::MessageDialog::new(
+        Some(&ui.window),
+        Some("Add app"),
+        Some("Paste a GitHub repo or URL — App Manager fills in the rest."),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("manual", "Manual…");
+    dialog.add_response("add", "Add");
+    dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("add"));
+    dialog.set_close_response("cancel");
+
+    let entry = gtk::Entry::builder()
+        .placeholder_text("github.com/owner/repo")
+        .activates_default(true)
+        .hexpand(true)
+        .build();
+    dialog.set_extra_child(Some(&entry));
+
+    let ui = ui.clone();
+    dialog.connect_response(None, move |_, resp| match resp {
+        "manual" => source_dialog(&ui, None),
+        "add" => {
+            let input = entry.text().trim().to_string();
+            if input.is_empty() {
+                toast(&ui, "Paste a GitHub repo or URL");
+                return;
+            }
+            toast(&ui, "Resolving…");
+            let ui2 = ui.clone();
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(sources::resolve_repo(&input));
+            });
+            glib::spawn_future_local(async move {
+                match rx.recv().await {
+                    Ok(Ok(src)) => apply_import(ui2, vec![src]),
+                    Ok(Err(e)) => toast(&ui2, &format!("Couldn't add: {e}")),
+                    Err(_) => {}
+                }
+            });
+        }
+        _ => {}
+    });
+    dialog.present();
+}
 
 /// Dialog to add a new app, or edit an existing one when `existing` is set
 /// (fixes a wrong kind, repo, etc.). Name, GitHub repo, executable/package,
