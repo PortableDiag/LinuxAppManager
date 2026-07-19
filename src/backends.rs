@@ -35,6 +35,19 @@ pub fn detect_installed(src: &Source) -> Option<String> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         }
+        Kind::Bin => {
+            if !bin_path(src).exists() {
+                return None;
+            }
+            // Binary is present; report the recorded version, else "unknown".
+            Some(
+                std::fs::read_to_string(bin_sidecar(src))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            )
+        }
     }
 }
 
@@ -45,6 +58,7 @@ pub fn install(src: &Source, latest: &Latest) -> Result<()> {
     match src.kind {
         Kind::Deb => install_deb(&file),
         Kind::AppImage => install_appimage(src, latest, &file),
+        Kind::Bin => install_bin(src, latest, &file),
     }
 }
 
@@ -58,6 +72,11 @@ pub fn remove(src: &Source) -> Result<()> {
             let _ = std::fs::remove_file(desktop_path(src));
             Ok(())
         }
+        Kind::Bin => {
+            let _ = std::fs::remove_file(bin_path(src));
+            let _ = std::fs::remove_file(bin_sidecar(src));
+            Ok(())
+        }
     }
 }
 
@@ -68,6 +87,12 @@ pub fn open(src: &Source) -> Result<()> {
             Command::new(appimage_path(src))
                 .spawn()
                 .context("launching AppImage")?;
+            Ok(())
+        }
+        Kind::Bin => {
+            Command::new(bin_path(src))
+                .spawn()
+                .context("launching binary")?;
             Ok(())
         }
         Kind::Deb => {
@@ -128,6 +153,38 @@ fn install_appimage(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()>
     Ok(())
 }
 
+fn install_bin(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
+    if latest.download_url.is_empty() {
+        return Err(anyhow!(
+            "{} has no downloadable release asset — build it from source and copy \
+             the binary into ~/.local/bin yourself",
+            src.name
+        ));
+    }
+    let dir = config::localbin_dir();
+    std::fs::create_dir_all(&dir)?;
+    let dest = bin_path(src);
+    if file != &dest {
+        std::fs::copy(file, &dest)?;
+        if file.starts_with(config::cache_dir()) {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+    let mut perms = std::fs::metadata(&dest)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&dest, perms)?;
+    record_bin_version(src, &latest.version)?;
+    Ok(())
+}
+
+/// Write a `bin` app's installed-version sidecar. Public so the UI/CLI can
+/// register an already-copied binary without re-downloading it.
+pub fn record_bin_version(src: &Source, version: &str) -> Result<()> {
+    std::fs::create_dir_all(config::versions_dir())?;
+    std::fs::write(bin_sidecar(src), version)?;
+    Ok(())
+}
+
 fn write_desktop(src: &Source, exec: &PathBuf) -> Result<()> {
     let dir = config::desktop_dir();
     std::fs::create_dir_all(&dir)?;
@@ -158,6 +215,14 @@ fn version_sidecar(src: &Source) -> PathBuf {
 
 fn desktop_path(src: &Source) -> PathBuf {
     config::desktop_dir().join(format!("{}.desktop", src.id))
+}
+
+fn bin_path(src: &Source) -> PathBuf {
+    config::localbin_dir().join(src.package_name())
+}
+
+fn bin_sidecar(src: &Source) -> PathBuf {
+    config::versions_dir().join(src.id.clone())
 }
 
 /// Run a privileged command through polkit. pkexec pops the system auth dialog.

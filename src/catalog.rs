@@ -33,6 +33,15 @@ impl Entry {
         }
     }
 
+    /// Whether we actually have something to download (a resolved asset URL).
+    /// A `bin` app can know its latest tag yet have no downloadable artifact.
+    pub fn installable(&self) -> bool {
+        self.latest
+            .as_ref()
+            .map(|l| !l.download_url.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Subtitle line, mirroring the Android app's phrasing.
     pub fn subtitle(&self) -> String {
         match self.status() {
@@ -43,11 +52,19 @@ impl Entry {
             Status::UpToDate => {
                 format!("Up to date · {}", self.installed.as_deref().unwrap_or("?"))
             }
-            Status::UpdateAvailable => format!(
-                "Installed {} → {}",
-                self.installed.as_deref().unwrap_or("?"),
-                self.latest.as_ref().map(|l| l.version.as_str()).unwrap_or("?")
-            ),
+            Status::UpdateAvailable => {
+                let base = format!(
+                    "Installed {} → {}",
+                    self.installed.as_deref().unwrap_or("?"),
+                    self.latest.as_ref().map(|l| l.version.as_str()).unwrap_or("?")
+                );
+                // Tag exists but there's nothing to download (source-only release).
+                if self.installable() {
+                    base
+                } else {
+                    format!("{base} · source only")
+                }
+            }
             Status::Unknown => format!(
                 "Installed {} · latest unknown",
                 self.installed.as_deref().unwrap_or("?")

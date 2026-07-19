@@ -11,14 +11,18 @@ pub enum Kind {
     Deb,
     /// An `.AppImage` dropped in ~/Applications (no root).
     AppImage,
+    /// A single executable dropped in ~/.local/bin (no root). Version tracked
+    /// in a sidecar; updates need a matching release asset to download.
+    Bin,
 }
 
 impl Kind {
-    /// Lowercase file extension used to pick a release asset.
+    /// Lowercase file extension used to pick a release asset (deb/appimage).
     pub fn ext(self) -> &'static str {
         match self {
             Kind::Deb => ".deb",
             Kind::AppImage => ".appimage",
+            Kind::Bin => "",
         }
     }
 }

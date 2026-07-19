@@ -28,6 +28,16 @@ struct Ui {
 }
 
 fn main() -> glib::ExitCode {
+    // Headless catalog dump — verify detection/resolution without the GUI
+    // (and without fighting GApplication's single-instance activation).
+    if std::env::args().any(|a| a == "--list") {
+        let srcs = config::load_sources().unwrap_or_default();
+        for e in catalog::build(&srcs) {
+            println!("{:<28} {}", e.source.name, e.subtitle());
+        }
+        return glib::ExitCode::SUCCESS;
+    }
+
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run()
@@ -146,9 +156,10 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
         if suggested {
             btn.add_css_class("suggested-action");
         }
-        // Can't install/update without a resolved download.
-        if matches!(action, Action::Install | Action::Update) && entry.latest.is_none() {
+        // Can't install/update without a resolved download asset.
+        if matches!(action, Action::Install | Action::Update) && !entry.installable() {
             btn.set_sensitive(false);
+            btn.set_tooltip_text(Some("No downloadable release asset for this app"));
         }
         wire(&btn, ui, entry.clone(), action);
         row.add_suffix(&btn);

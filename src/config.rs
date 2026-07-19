@@ -25,6 +25,20 @@ pub fn appimage_dir() -> PathBuf {
         .join("Applications")
 }
 
+/// ~/.local/bin — where single-executable (`bin`) apps live.
+pub fn localbin_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local")
+        .join("bin")
+}
+
+/// Where `bin`-kind installed-version sidecars are recorded (config dir, so we
+/// don't clutter ~/.local/bin with dotfiles).
+pub fn versions_dir() -> PathBuf {
+    config_dir().join("versions")
+}
+
 /// ~/.local/share/applications — .desktop entries.
 pub fn desktop_dir() -> PathBuf {
     dirs::data_dir()
@@ -48,12 +62,14 @@ pub fn load_sources() -> Result<Vec<Source>> {
 }
 
 /// The manager ships in its own list, exactly like the Android App Manager.
+/// It installs as a single binary in ~/.local/bin, so its own kind is `bin`.
 const DEFAULT_SOURCES: &str = r#"[
   {
     "id": "com.procomputation.LinuxAppManager",
     "name": "App Manager",
     "description": "This app. Manages itself.",
-    "kind": "appimage",
+    "kind": "bin",
+    "package": "linux-app-manager",
     "origin": { "type": "github", "repo": "PortableDiag/LinuxAppManager" }
   }
 ]
