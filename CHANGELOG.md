@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.1 — 2026-07-19
+
+- **App detail page** — clicking a row pushes a page with the description,
+  details (status / installed / latest / size / kind / source), release notes
+  from the GitHub release, and actions (install / update / open / remove +
+  auto-update toggle).
+- **Fix: private-repo asset downloads** — resolve via the authenticated asset
+  API URL and follow the pre-signed redirect unauthenticated. Previously
+  `browser_download_url` returned an HTML login page, so private installs/updates
+  silently failed.
+
+## 0.1.0 — 2026-07-19
 
 Later in 0.1.0 dev:
 
