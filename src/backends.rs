@@ -45,7 +45,7 @@ pub fn detect_installed(src: &Source) -> Option<String> {
                     .ok()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "unknown".to_string()),
+                    .unwrap_or_else(|| crate::model::UNKNOWN_VERSION.to_string()),
             )
         }
     }

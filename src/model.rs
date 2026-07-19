@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
+/// Sentinel for "installed, but we can't determine the version" — a binary you
+/// built yourself that App Manager didn't install (so there's no sidecar).
+pub const UNKNOWN_VERSION: &str = "unknown";
+
 /// How an app is delivered and managed on the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

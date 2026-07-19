@@ -1,6 +1,6 @@
 //! Building the catalog: for each source, what's installed vs what's latest.
 
-use crate::model::{compare, Latest, Source};
+use crate::model::{compare, Latest, Source, UNKNOWN_VERSION};
 use crate::{backends, sources};
 use std::cmp::Ordering;
 
@@ -25,6 +25,9 @@ impl Entry {
     pub fn status(&self) -> Status {
         match (&self.installed, &self.latest) {
             (None, _) => Status::NotInstalled,
+            // Binary present but its version is indeterminate (a build of your
+            // own that App Manager didn't install) — don't imply an update.
+            (Some(i), _) if i == UNKNOWN_VERSION => Status::Unknown,
             (Some(_), None) => Status::Unknown,
             (Some(i), Some(l)) => match compare(&l.version, i) {
                 Ordering::Greater => Status::UpdateAvailable,
@@ -65,10 +68,17 @@ impl Entry {
                     format!("{base} · source only")
                 }
             }
-            Status::Unknown => format!(
-                "Installed {} · latest unknown",
-                self.installed.as_deref().unwrap_or("?")
-            ),
+            Status::Unknown => {
+                let inst = self.installed.as_deref().unwrap_or("?");
+                if inst == UNKNOWN_VERSION {
+                    match &self.latest {
+                        Some(l) => format!("Installed · version unknown · latest {}", l.version),
+                        None => "Installed · version unknown".to_string(),
+                    }
+                } else {
+                    format!("Installed {inst} · latest unknown")
+                }
+            }
         }
     }
 }

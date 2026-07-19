@@ -405,12 +405,13 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
         row.add_suffix(&btn);
     }
 
-    // Primary action.
+    // Primary action. No "Open" on our own entry — it'd just relaunch us.
+    let is_self = entry.source.id == APP_ID;
     let primary = match status {
         Status::NotInstalled => Some(("Install", Action::Install, true)),
         Status::UpdateAvailable => Some(("Update", Action::Update, true)),
-        Status::UpToDate => Some(("Open", Action::Open, false)),
-        Status::Unknown => Some(("Open", Action::Open, false)),
+        Status::UpToDate | Status::Unknown if is_self => None,
+        Status::UpToDate | Status::Unknown => Some(("Open", Action::Open, false)),
     };
     if let Some((label, action, suggested)) = primary {
         let btn = gtk::Button::with_label(label);
@@ -499,9 +500,11 @@ fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
         .halign(gtk::Align::Start)
         .build();
     let status = entry.status();
+    let is_self = entry.source.id == APP_ID;
     let primary = match status {
         Status::NotInstalled => Some(("Install", Action::Install, true)),
         Status::UpdateAvailable => Some(("Update", Action::Update, true)),
+        Status::UpToDate | Status::Unknown if is_self => None,
         Status::UpToDate | Status::Unknown => Some(("Open", Action::Open, false)),
     };
     if let Some((label, action, suggested)) = primary {
