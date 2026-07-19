@@ -113,7 +113,17 @@ const DEFAULT_SOURCES: &str = r#"[
     "description": "This app. Manages itself.",
     "kind": "bin",
     "package": "linux-app-manager",
+    "auto_update": true,
     "origin": { "type": "github", "repo": "PortableDiag/LinuxAppManager" }
   }
 ]
 "#;
+
+/// Flip a single source's auto-update flag and save.
+pub fn set_auto_update(id: &str, on: bool) -> Result<()> {
+    let mut srcs = load_sources()?;
+    if let Some(s) = srcs.iter_mut().find(|s| s.id == id) {
+        s.auto_update = on;
+    }
+    save_sources(&srcs)
+}

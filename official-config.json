@@ -8,6 +8,7 @@
       "description": "This app. Manages itself.",
       "kind": "bin",
       "package": "linux-app-manager",
+      "auto_update": true,
       "origin": { "type": "github", "repo": "PortableDiag/LinuxAppManager" }
     },
     {

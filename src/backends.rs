@@ -164,15 +164,19 @@ fn install_bin(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
     let dir = config::localbin_dir();
     std::fs::create_dir_all(&dir)?;
     let dest = bin_path(src);
-    if file != &dest {
-        std::fs::copy(file, &dest)?;
-        if file.starts_with(config::cache_dir()) {
-            let _ = std::fs::remove_file(file);
-        }
-    }
-    let mut perms = std::fs::metadata(&dest)?.permissions();
+    // Stage next to the target, then atomically rename over it. A plain copy
+    // fails with ETXTBSY when replacing a running executable (e.g. the manager
+    // updating itself); rename swaps the dir entry and leaves the running
+    // inode intact, so self-update works — it just takes effect on next launch.
+    let staged = dir.join(format!(".{}.new", src.package_name()));
+    std::fs::copy(file, &staged)?;
+    let mut perms = std::fs::metadata(&staged)?.permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(&dest, perms)?;
+    std::fs::set_permissions(&staged, perms)?;
+    std::fs::rename(&staged, &dest)?;
+    if file.starts_with(config::cache_dir()) {
+        let _ = std::fs::remove_file(file);
+    }
     record_bin_version(src, &latest.version)?;
     Ok(())
 }

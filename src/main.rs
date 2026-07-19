@@ -30,19 +30,130 @@ struct Ui {
 }
 
 fn main() -> glib::ExitCode {
-    // Headless catalog dump — verify detection/resolution without the GUI
-    // (and without fighting GApplication's single-instance activation).
-    if std::env::args().any(|a| a == "--list") {
-        let srcs = config::load_sources().unwrap_or_default();
-        for e in catalog::build(&srcs) {
-            println!("{:<28} {}", e.source.name, e.subtitle());
-        }
-        return glib::ExitCode::SUCCESS;
+    // Headless commands run without the GUI (and without fighting
+    // GApplication's single-instance activation). No args → launch the app.
+    if let Some(code) = run_cli() {
+        return code;
     }
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run()
+}
+
+/// Dispatch a headless command. Returns `Some(code)` when one was handled,
+/// `None` (no args) to fall through to the GUI.
+fn run_cli() -> Option<glib::ExitCode> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = args.first()?.as_str();
+    Some(match cmd {
+        "-h" | "--help" => {
+            print_usage();
+            glib::ExitCode::SUCCESS
+        }
+        "--list" => {
+            let srcs = config::load_sources().unwrap_or_default();
+            for e in catalog::build(&srcs) {
+                println!("{:<28} {}", e.source.name, e.subtitle());
+            }
+            glib::ExitCode::SUCCESS
+        }
+        "--auto-update" => {
+            let srcs = config::load_sources().unwrap_or_default();
+            let r = catalog::auto_update(&srcs);
+            for name in &r.updated {
+                println!("updated: {name}");
+            }
+            for (name, e) in &r.failed {
+                eprintln!("failed: {name}: {e}");
+            }
+            if r.updated.is_empty() && r.failed.is_empty() {
+                println!("nothing to update");
+            }
+            if r.failed.is_empty() {
+                glib::ExitCode::SUCCESS
+            } else {
+                glib::ExitCode::FAILURE
+            }
+        }
+        "--import-official" => cli_import(sources::fetch_official()),
+        "--import" => match args.get(1) {
+            Some(path) => {
+                let parsed = std::fs::read_to_string(path)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|t| sources::parse_config(&t));
+                cli_import(parsed)
+            }
+            None => {
+                eprintln!("--import needs a file path");
+                glib::ExitCode::FAILURE
+            }
+        },
+        "--export" => match args.get(1) {
+            Some(path) => {
+                let srcs = config::load_sources().unwrap_or_default();
+                match config::export_config(&srcs, std::path::Path::new(path)) {
+                    Ok(()) => {
+                        println!("Exported {} sources to {path}", srcs.len());
+                        glib::ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("export failed: {e}");
+                        glib::ExitCode::FAILURE
+                    }
+                }
+            }
+            None => {
+                eprintln!("--export needs a file path");
+                glib::ExitCode::FAILURE
+            }
+        },
+        other => {
+            eprintln!("unknown option: {other}\n");
+            print_usage();
+            glib::ExitCode::FAILURE
+        }
+    })
+}
+
+/// Merge parsed sources into the live list and save, reporting counts.
+fn cli_import(incoming: anyhow::Result<Vec<Source>>) -> glib::ExitCode {
+    let list = match incoming {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("import failed: {e}");
+            return glib::ExitCode::FAILURE;
+        }
+    };
+    let existing = config::load_sources().unwrap_or_default();
+    let (merged, added, updated) = config::merge(&existing, list);
+    match config::save_sources(&merged) {
+        Ok(()) => {
+            println!(
+                "Imported: {added} added, {updated} updated ({} total)",
+                merged.len()
+            );
+            glib::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("save failed: {e}");
+            glib::ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_usage() {
+    println!(
+        "linux-app-manager — private sideload/catalog manager\n\n\
+         USAGE:\n  \
+         linux-app-manager                 launch the GUI\n  \
+         linux-app-manager --list          print the catalog (installed vs latest)\n  \
+         linux-app-manager --auto-update   install pending updates for auto-update apps\n  \
+         linux-app-manager --import-official   merge the repo's official list\n  \
+         linux-app-manager --import <file>     merge a config/sources file\n  \
+         linux-app-manager --export <file>     write your list as a shareable config\n  \
+         linux-app-manager --help          show this help"
+    );
 }
 
 fn build_ui(app: &adw::Application) {
@@ -109,7 +220,29 @@ fn build_ui(app: &adw::Application) {
     menu_btn.set_popover(Some(&import_export_menu(&ui)));
 
     window.present();
-    refresh(ui);
+    refresh(ui.clone());
+    run_auto_update(ui);
+}
+
+/// On startup, install pending updates for flagged apps, then refresh.
+fn run_auto_update(ui: Rc<Ui>) {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let srcs = config::load_sources().unwrap_or_default();
+        let _ = tx.send_blocking(catalog::auto_update(&srcs));
+    });
+    glib::spawn_future_local(async move {
+        let Ok(result) = rx.recv().await else { return };
+        for name in &result.updated {
+            toast(&ui, &format!("Auto-updated {name} (restart to apply if it's this app)"));
+        }
+        for (name, e) in &result.failed {
+            toast(&ui, &format!("Auto-update of {name} failed: {e}"));
+        }
+        if !result.updated.is_empty() {
+            refresh(ui);
+        }
+    });
 }
 
 /// Popover with import/export actions for the header ▾ menu.
@@ -185,6 +318,22 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
         .build();
 
     let status = entry.status();
+
+    // Per-app auto-update toggle (off by default; on for the manager itself).
+    let auto = gtk::Switch::builder()
+        .active(entry.source.auto_update)
+        .valign(gtk::Align::Center)
+        .tooltip_text("Auto-update this app")
+        .build();
+    let id = entry.source.id.clone();
+    let ui_sw = ui.clone();
+    auto.connect_state_set(move |_, state| {
+        if let Err(e) = config::set_auto_update(&id, state) {
+            toast(&ui_sw, &format!("Save failed: {e}"));
+        }
+        glib::Propagation::Proceed
+    });
+    row.add_suffix(&auto);
 
     // Remove button, when something is installed.
     if matches!(status, Status::UpToDate | Status::UpdateAvailable | Status::Unknown) {
@@ -344,6 +493,7 @@ fn add_source_dialog(ui: &Rc<Ui>) {
             kind,
             package: (!pkg.is_empty()).then_some(pkg),
             origin: Origin::Github { repo },
+            auto_update: false,
         };
         apply_import(ui.clone(), vec![src]);
     });

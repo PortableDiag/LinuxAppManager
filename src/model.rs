@@ -52,6 +52,10 @@ pub struct Source {
     /// For `deb`: the dpkg package to query, if different from `id`.
     #[serde(default)]
     pub package: Option<String>,
+    /// Install updates automatically (on startup / on the background pass).
+    /// Off by default; the manager enables it for itself.
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 impl Source {

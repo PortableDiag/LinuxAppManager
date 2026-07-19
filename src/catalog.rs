@@ -83,3 +83,30 @@ pub fn build(srcs: &[Source]) -> Vec<Entry> {
         })
         .collect()
 }
+
+/// Outcome of an auto-update pass.
+#[derive(Default)]
+pub struct AutoUpdate {
+    pub updated: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// Install pending updates for every `auto_update` source that actually has a
+/// downloadable one waiting. Blocking — run off the UI thread.
+pub fn auto_update(srcs: &[Source]) -> AutoUpdate {
+    let mut out = AutoUpdate::default();
+    for entry in build(srcs) {
+        if !entry.source.auto_update
+            || entry.status() != Status::UpdateAvailable
+            || !entry.installable()
+        {
+            continue;
+        }
+        let Some(latest) = &entry.latest else { continue };
+        match backends::install(&entry.source, latest) {
+            Ok(()) => out.updated.push(entry.source.name.clone()),
+            Err(e) => out.failed.push((entry.source.name.clone(), e.to_string())),
+        }
+    }
+    out
+}
