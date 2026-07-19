@@ -25,6 +25,9 @@ struct Ui {
     window: adw::ApplicationWindow,
     list: gtk::ListBox,
     toasts: adw::ToastOverlay,
+    nav: adw::NavigationView,
+    /// Entries backing the list rows, indexed by row position (for row clicks).
+    entries: RefCell<Vec<Entry>>,
     /// Guards against overlapping refreshes.
     busy: RefCell<bool>,
 }
@@ -36,7 +39,13 @@ fn main() -> glib::ExitCode {
         return code;
     }
 
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let mut builder = adw::Application::builder().application_id(APP_ID);
+    // Test hook: run a second instance alongside a live one (skips
+    // GApplication's single-instance activation) for smoke-testing.
+    if std::env::var_os("LAM_NONUNIQUE").is_some() {
+        builder = builder.flags(gio::ApplicationFlags::NON_UNIQUE);
+    }
+    let app = builder.build();
     app.connect_activate(build_ui);
     app.run()
 }
@@ -176,9 +185,6 @@ fn build_ui(app: &adw::Application) {
         .child(&clamp)
         .build();
 
-    let toasts = adw::ToastOverlay::new();
-    toasts.set_child(Some(&scroller));
-
     let refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh_btn.set_tooltip_text(Some("Refresh"));
     let add_btn = gtk::Button::from_icon_name("list-add-symbolic");
@@ -194,22 +200,37 @@ fn build_ui(app: &adw::Application) {
     header.pack_end(&menu_btn);
     header.pack_end(&add_btn);
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&toasts));
+    // Root page of the navigation stack (the app list). Detail pages push on top.
+    let root_toolbar = adw::ToolbarView::new();
+    root_toolbar.add_top_bar(&header);
+    root_toolbar.set_content(Some(&scroller));
+    let root_page = adw::NavigationPage::builder()
+        .title("App Manager")
+        .tag("main")
+        .child(&root_toolbar)
+        .build();
+
+    let nav = adw::NavigationView::new();
+    nav.add(&root_page);
+
+    // Toasts overlay the whole stack, so they show on detail pages too.
+    let toasts = adw::ToastOverlay::new();
+    toasts.set_child(Some(&nav));
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("App Manager")
         .default_width(560)
-        .default_height(740)
-        .content(&toolbar)
+        .default_height(760)
+        .content(&toasts)
         .build();
 
     let ui = Rc::new(Ui {
         window: window.clone(),
         list,
         toasts,
+        nav,
+        entries: RefCell::new(Vec::new()),
         busy: RefCell::new(false),
     });
 
@@ -218,6 +239,19 @@ fn build_ui(app: &adw::Application) {
     let ui_add = ui.clone();
     add_btn.connect_clicked(move |_| add_source_dialog(&ui_add));
     menu_btn.set_popover(Some(&import_export_menu(&ui)));
+
+    // Row click → push that app's detail page.
+    let ui_row = ui.clone();
+    ui.list.connect_row_activated(move |_, row| {
+        let idx = row.index();
+        if idx < 0 {
+            return;
+        }
+        let entry = ui_row.entries.borrow().get(idx as usize).cloned();
+        if let Some(entry) = entry {
+            push_detail(&ui_row, entry);
+        }
+    });
 
     window.present();
     refresh(ui.clone());
@@ -287,6 +321,7 @@ fn refresh(ui: Rc<Ui>) {
     }
     *ui.busy.borrow_mut() = true;
 
+    ui.entries.borrow_mut().clear();
     clear(&ui.list);
     ui.list.append(&status_row("Loading…"));
 
@@ -299,14 +334,26 @@ fn refresh(ui: Rc<Ui>) {
     glib::spawn_future_local(async move {
         let entries = rx.recv().await.unwrap_or_default();
         clear(&ui.list);
+        // Keep entries in sync with row positions for click → detail lookups.
+        *ui.entries.borrow_mut() = entries.clone();
         if entries.is_empty() {
-            ui.list.append(&status_row("No sources. Edit sources.json to add apps."));
+            ui.list
+                .append(&status_row("No sources. Add one with ＋ or import a list."));
         } else {
             for entry in entries {
                 ui.list.append(&app_row(&ui, entry));
             }
         }
         *ui.busy.borrow_mut() = false;
+
+        // Test hook: exercise detail-page construction + push for real.
+        if std::env::var_os("LAM_TEST_DETAIL").is_some() {
+            if let Some(e) = ui.entries.borrow().first().cloned() {
+                let name = e.source.name.clone();
+                push_detail(&ui, e);
+                eprintln!("LAM_TEST_DETAIL: pushed detail for {name}");
+            }
+        }
     });
 }
 
@@ -315,6 +362,7 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(&entry.source.name)
         .subtitle(&entry.subtitle())
+        .activatable(true)
         .build();
 
     let status = entry.status();
@@ -367,6 +415,178 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
     }
 
     row
+}
+
+// --- detail page -----------------------------------------------------------
+
+fn push_detail(ui: &Rc<Ui>, entry: Entry) {
+    ui.nav.push(&build_detail_page(ui, entry));
+}
+
+/// A per-app page: description, details, release notes, and actions.
+fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
+    let src = &entry.source;
+    let prefs = adw::PreferencesPage::new();
+
+    // Description (as the intro group's description text).
+    if let Some(desc) = src.description.as_deref().filter(|d| !d.trim().is_empty()) {
+        let head = adw::PreferencesGroup::builder().description(desc).build();
+        prefs.add(&head);
+    }
+
+    // Details.
+    let details = adw::PreferencesGroup::builder().title("Details").build();
+    let add_row = |title: &str, value: &str| {
+        let r = adw::ActionRow::builder().title(title).subtitle(value).build();
+        r.set_subtitle_selectable(true);
+        details.add(&r);
+    };
+    add_row("Status", status_text(entry.status()));
+    add_row("Installed", entry.installed.as_deref().unwrap_or("—"));
+    if let Some(l) = &entry.latest {
+        add_row("Latest", &l.version);
+        if let Some(sz) = l.size {
+            add_row("Download size", &human_size(sz));
+        }
+    }
+    add_row("Kind", kind_text(src.kind));
+    add_row("Source", &origin_text(&src.origin));
+    prefs.add(&details);
+
+    // Release notes / changelog.
+    if let Some(notes) = entry
+        .latest
+        .as_ref()
+        .and_then(|l| l.notes.as_deref())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        let g = adw::PreferencesGroup::builder().title("Release notes").build();
+        let label = gtk::Label::builder()
+            .label(notes)
+            .wrap(true)
+            .xalign(0.0)
+            .selectable(true)
+            .build();
+        label.add_css_class("body");
+        g.add(&label);
+        prefs.add(&g);
+    }
+
+    // Actions.
+    let actions = adw::PreferencesGroup::builder().title("Actions").build();
+    let bx = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(6)
+        .margin_bottom(6)
+        .halign(gtk::Align::Start)
+        .build();
+    let status = entry.status();
+    let primary = match status {
+        Status::NotInstalled => Some(("Install", Action::Install, true)),
+        Status::UpdateAvailable => Some(("Update", Action::Update, true)),
+        Status::UpToDate | Status::Unknown => Some(("Open", Action::Open, false)),
+    };
+    if let Some((label, action, suggested)) = primary {
+        let btn = gtk::Button::with_label(label);
+        if suggested {
+            btn.add_css_class("suggested-action");
+        }
+        if matches!(action, Action::Install | Action::Update) && !entry.installable() {
+            btn.set_sensitive(false);
+            btn.set_tooltip_text(Some("No downloadable release asset for this app"));
+        }
+        wire_detail(&btn, ui, entry.clone(), action);
+        bx.append(&btn);
+    }
+    if matches!(status, Status::UpToDate | Status::UpdateAvailable | Status::Unknown) {
+        let btn = gtk::Button::with_label("Remove");
+        btn.add_css_class("destructive-action");
+        wire_detail(&btn, ui, entry.clone(), Action::Remove);
+        bx.append(&btn);
+    }
+    actions.add(&bx);
+
+    // Auto-update toggle.
+    let auto_row = adw::ActionRow::builder()
+        .title("Auto-update")
+        .subtitle("Install updates automatically")
+        .build();
+    let auto = gtk::Switch::builder()
+        .active(src.auto_update)
+        .valign(gtk::Align::Center)
+        .build();
+    let id = src.id.clone();
+    let ui_sw = ui.clone();
+    auto.connect_state_set(move |_, state| {
+        if let Err(e) = config::set_auto_update(&id, state) {
+            toast(&ui_sw, &format!("Save failed: {e}"));
+        }
+        glib::Propagation::Proceed
+    });
+    auto_row.add_suffix(&auto);
+    auto_row.set_activatable_widget(Some(&auto));
+    actions.add(&auto_row);
+    prefs.add(&actions);
+
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.set_content(Some(&prefs));
+    adw::NavigationPage::builder()
+        .title(&src.name)
+        .child(&toolbar)
+        .build()
+}
+
+/// Detail-page action: run it, then return to the list (which refreshes).
+fn wire_detail(btn: &gtk::Button, ui: &Rc<Ui>, entry: Entry, action: Action) {
+    let ui = ui.clone();
+    btn.connect_clicked(move |b| {
+        b.set_sensitive(false);
+        do_action(ui.clone(), entry.clone(), action);
+        if !matches!(action, Action::Open) {
+            ui.nav.pop();
+        }
+    });
+}
+
+fn status_text(s: Status) -> &'static str {
+    match s {
+        Status::NotInstalled => "Not installed",
+        Status::UpToDate => "Up to date",
+        Status::UpdateAvailable => "Update available",
+        Status::Unknown => "Installed (latest unknown)",
+    }
+}
+
+fn kind_text(k: Kind) -> &'static str {
+    match k {
+        Kind::Bin => "Executable (~/.local/bin)",
+        Kind::AppImage => "AppImage (~/Applications)",
+        Kind::Deb => "Debian package (apt)",
+    }
+}
+
+fn origin_text(o: &Origin) -> String {
+    match o {
+        Origin::Github { repo } => format!("github.com/{repo}"),
+        Origin::Url { url } => url.clone(),
+        Origin::Local { path } => path.clone(),
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let b = bytes as f64;
+    if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 #[derive(Clone, Copy)]
