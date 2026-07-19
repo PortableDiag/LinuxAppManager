@@ -14,6 +14,39 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
+// Embedded so a loose binary (USB / fresh download) can install itself with its
+// icon and menu entry, no network and no side files needed.
+const SELF_ICON: &str = include_str!("../data/com.procomputation.LinuxAppManager.svg");
+const SELF_DESKTOP: &str = include_str!("../data/com.procomputation.LinuxAppManager.desktop");
+const SELF_ID: &str = "com.procomputation.LinuxAppManager";
+
+/// Install the *currently running* App Manager binary to ~/.local/bin, plus its
+/// icon and .desktop entry. Copies this executable (works offline / from a USB),
+/// not a download. Atomic rename, so it's safe even over the running install.
+pub fn install_self() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("locating the running binary")?;
+    let dir = config::localbin_dir();
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join("linux-app-manager");
+    let staged = dir.join(".linux-app-manager.new");
+    std::fs::copy(&exe, &staged).context("copying binary")?;
+    let mut perms = std::fs::metadata(&staged)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&staged, perms)?;
+    std::fs::rename(&staged, &dest)?;
+
+    let icon_dir = config::data_dir_icons();
+    std::fs::create_dir_all(&icon_dir)?;
+    std::fs::write(icon_dir.join(format!("{SELF_ID}.svg")), SELF_ICON)?;
+    let app_dir = config::desktop_dir();
+    std::fs::create_dir_all(&app_dir)?;
+    std::fs::write(app_dir.join(format!("{SELF_ID}.desktop")), SELF_DESKTOP)?;
+
+    std::fs::create_dir_all(config::versions_dir())?;
+    std::fs::write(config::versions_dir().join(SELF_ID), env!("CARGO_PKG_VERSION"))?;
+    Ok(dest)
+}
+
 /// Installed version, or `None` if not present.
 pub fn detect_installed(src: &Source) -> Option<String> {
     match src.kind {

@@ -85,6 +85,16 @@ fn run_cli() -> Option<glib::ExitCode> {
                 glib::ExitCode::FAILURE
             }
         }
+        "--install-self" => match backends::install_self() {
+            Ok(path) => {
+                println!("Installed App Manager to {}", path.display());
+                glib::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("install failed: {e}");
+                glib::ExitCode::FAILURE
+            }
+        },
         "--add" => match args.get(1) {
             Some(input) => cli_import(sources::resolve_repo(input).map(|s| vec![s])),
             None => {
@@ -172,6 +182,7 @@ fn print_usage() {
          linux-app-manager                 launch the GUI\n  \
          linux-app-manager --list          print the catalog (installed vs latest)\n  \
          linux-app-manager --add <repo>    add one GitHub repo/URL (auto-detected)\n  \
+         linux-app-manager --install-self  install THIS binary to ~/.local/bin (+icon,menu)\n  \
          linux-app-manager --auto-update   install pending updates for auto-update apps\n  \
          linux-app-manager --follow-user <u>   add a GitHub user's installable repos\n  \
          linux-app-manager --import-official   merge the repo's official list\n  \
@@ -413,15 +424,15 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
         row.add_suffix(&btn);
     }
 
-    // Primary action. No "Open" on our own entry — it'd just relaunch us.
+    // Primary action. Our own entry gets a self-install button (copies the
+    // running binary) instead of an Open/download action.
     let is_self = entry.source.id == APP_ID;
-    let primary = match status {
-        Status::NotInstalled => Some(("Install", Action::Install, true)),
-        Status::UpdateAvailable => Some(("Update", Action::Update, true)),
-        Status::UpToDate | Status::Unknown if is_self => None,
-        Status::UpToDate | Status::Unknown => Some(("Open", Action::Open, false)),
-    };
-    if let Some((label, action, suggested)) = primary {
+    if is_self {
+        if let Some(btn) = self_action_button(ui, &entry, status) {
+            btn.set_valign(gtk::Align::Center);
+            row.add_suffix(&btn);
+        }
+    } else if let Some((label, action, suggested)) = normal_primary(status) {
         let btn = gtk::Button::with_label(label);
         btn.set_valign(gtk::Align::Center);
         if suggested {
@@ -437,6 +448,78 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
     }
 
     row
+}
+
+/// Install/Update/Open label for a normal (non-self) app.
+fn normal_primary(status: Status) -> Option<(&'static str, Action, bool)> {
+    match status {
+        Status::NotInstalled => Some(("Install", Action::Install, true)),
+        Status::UpdateAvailable => Some(("Update", Action::Update, true)),
+        Status::UpToDate | Status::Unknown => Some(("Open", Action::Open, false)),
+    }
+}
+
+/// The action button for App Manager's own entry: install THIS running copy to
+/// ~/.local/bin when we're a loose binary (USB / repo / download); otherwise a
+/// normal download-update if a newer release is out; else nothing.
+fn self_action_button(ui: &Rc<Ui>, entry: &Entry, status: Status) -> Option<gtk::Button> {
+    if let Some(label) = self_install_label() {
+        let btn = gtk::Button::with_label(label);
+        btn.add_css_class("suggested-action");
+        btn.set_tooltip_text(Some("Install this running copy to ~/.local/bin"));
+        let ui = ui.clone();
+        btn.connect_clicked(move |b| {
+            b.set_sensitive(false);
+            do_self_install(ui.clone());
+        });
+        Some(btn)
+    } else if matches!(status, Status::UpdateAvailable) && entry.installable() {
+        let btn = gtk::Button::with_label("Update");
+        btn.add_css_class("suggested-action");
+        let ui = ui.clone();
+        let entry = entry.clone();
+        btn.connect_clicked(move |b| {
+            b.set_sensitive(false);
+            do_action(ui.clone(), entry.clone(), Action::Update);
+        });
+        Some(btn)
+    } else {
+        None
+    }
+}
+
+/// Label for the self-install button, or None when we're already running the
+/// installed copy at ~/.local/bin.
+fn self_install_label() -> Option<&'static str> {
+    let installed = dirs::home_dir()?.join(".local/bin/linux-app-manager");
+    let running = std::env::current_exe().ok()?;
+    let running_c = std::fs::canonicalize(&running).ok();
+    let installed_c = std::fs::canonicalize(&installed).ok();
+    if running_c.is_some() && running_c == installed_c {
+        None
+    } else if installed.exists() {
+        Some("Reinstall this copy")
+    } else {
+        Some("Install")
+    }
+}
+
+/// Copy the running binary into ~/.local/bin (+ icon, menu entry), off-thread.
+fn do_self_install(ui: Rc<Ui>) {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(backends::install_self());
+    });
+    glib::spawn_future_local(async move {
+        match rx.recv().await {
+            Ok(Ok(path)) => {
+                toast(&ui, &format!("Installed to {} — launch it from your app menu", path.display()));
+                refresh(ui);
+            }
+            Ok(Err(e)) => toast(&ui, &format!("Install failed: {e}")),
+            Err(_) => {}
+        }
+    });
 }
 
 // --- detail page -----------------------------------------------------------
@@ -509,13 +592,11 @@ fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
         .build();
     let status = entry.status();
     let is_self = entry.source.id == APP_ID;
-    let primary = match status {
-        Status::NotInstalled => Some(("Install", Action::Install, true)),
-        Status::UpdateAvailable => Some(("Update", Action::Update, true)),
-        Status::UpToDate | Status::Unknown if is_self => None,
-        Status::UpToDate | Status::Unknown => Some(("Open", Action::Open, false)),
-    };
-    if let Some((label, action, suggested)) = primary {
+    if is_self {
+        if let Some(btn) = self_action_button(ui, &entry, status) {
+            bx.append(&btn);
+        }
+    } else if let Some((label, action, suggested)) = normal_primary(status) {
         let btn = gtk::Button::with_label(label);
         if suggested {
             btn.add_css_class("suggested-action");

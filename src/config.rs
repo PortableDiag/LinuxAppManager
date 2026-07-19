@@ -50,6 +50,13 @@ pub fn desktop_dir() -> PathBuf {
         .join("applications")
 }
 
+/// ~/.local/share/icons/hicolor/scalable/apps — scalable app icons.
+pub fn data_dir_icons() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("icons/hicolor/scalable/apps")
+}
+
 fn sources_path() -> PathBuf {
     config_dir().join("sources.json")
 }
