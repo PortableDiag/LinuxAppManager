@@ -25,7 +25,8 @@ fn github_latest(src: &Source, repo: &str) -> Result<Option<Latest>> {
     let mut req = ureq::get(&url)
         .set("User-Agent", "LinuxAppManager")
         .set("Accept", "application/vnd.github+json");
-    // Private repos 404 without auth. Reuse the user's existing GitHub token.
+    // Anonymous by default (public repos); an optional env token is sent only if
+    // the user set one — never the gh login. See github_token().
     if let Some(token) = github_token() {
         req = req.set("Authorization", &format!("Bearer {token}"));
     }
@@ -42,9 +43,9 @@ fn github_latest(src: &Source, repo: &str) -> Result<Option<Latest>> {
     let assets = json["assets"].as_array().cloned().unwrap_or_default();
     let asset = pick_asset(&assets, src);
 
-    // Use the asset *API* URL (api.github.com/.../releases/assets/{id}) rather
-    // than browser_download_url: it accepts a token, so private-repo assets
-    // download. See backends::download for the octet-stream + redirect dance.
+    // Use the asset *API* URL (api.github.com/.../releases/assets/{id}). It works
+    // anonymously for public repos (and with an optional env token). See
+    // backends::download for the octet-stream + redirect dance.
     let (download_url, size) = match &asset {
         Some(a) => (
             a["url"].as_str().unwrap_or("").to_string(),
@@ -75,8 +76,7 @@ pub fn parse_config(text: &str) -> Result<Vec<Source>> {
     Ok(serde_json::from_value(arr)?)
 }
 
-/// Fetch the curated official list from the repo (works for a private repo via
-/// the API's raw media type + the user's token).
+/// Fetch the curated official list from the repo (public; anonymous API).
 pub fn fetch_official() -> Result<Vec<Source>> {
     let url = format!(
         "https://api.github.com/repos/{}/contents/{}",
@@ -93,8 +93,11 @@ pub fn fetch_official() -> Result<Vec<Source>> {
     parse_config(&text)
 }
 
-/// A GitHub token for private-repo access: `$GITHUB_TOKEN` / `$GH_TOKEN`, else
-/// whatever `gh auth token` reports. `None` if the user has no gh login.
+/// An OPTIONAL GitHub token, taken only from `$GITHUB_TOKEN` / `$GH_TOKEN`.
+/// App Manager uses the anonymous public API by default — it never reads your
+/// `gh` login. A token is sent only if you explicitly set one in the
+/// environment (e.g. to raise the 60/hour anonymous rate limit). Returns None
+/// otherwise, so everything works against public repos with no auth.
 pub fn github_token() -> Option<String> {
     for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
         if let Ok(t) = std::env::var(var) {
@@ -103,15 +106,7 @@ pub fn github_token() -> Option<String> {
             }
         }
     }
-    let out = std::process::Command::new("gh")
-        .args(["auth", "token"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!t.is_empty()).then_some(t)
+    None
 }
 
 // Arch tokens seen in release asset names. HOST is what matches this build.
@@ -214,29 +209,11 @@ pub fn follow_user(user: &str) -> Result<Vec<Source>> {
         return Err(anyhow::anyhow!("no username given"));
     }
 
-    // The token owner's own repos (public + private), filtered to this account.
-    let mut repos = gh_repo_pages("https://api.github.com/user/repos?affiliation=owner");
-    repos.retain(|r| {
-        r["owner"]["login"]
-            .as_str()
-            .map(|l| l.eq_ignore_ascii_case(&user))
-            .unwrap_or(false)
-    });
-    // Plus the user's public repos (covers other people's accounts).
-    let mut seen: std::collections::HashSet<String> = repos
-        .iter()
-        .filter_map(|r| r["full_name"].as_str().map(str::to_string))
-        .collect();
-    for r in gh_repo_pages(&format!("https://api.github.com/users/{user}/repos")) {
-        if let Some(f) = r["full_name"].as_str() {
-            if seen.insert(f.to_string()) {
-                repos.push(r);
-            }
-        }
-    }
+    // The user's public repos (anonymous API — no gh login used).
+    let repos = gh_repo_pages(&format!("https://api.github.com/users/{user}/repos"));
     if repos.is_empty() {
         return Err(anyhow::anyhow!(
-            "no repos found for '{user}' (private repos need your gh token)"
+            "no public repos found for '{user}'"
         ));
     }
 

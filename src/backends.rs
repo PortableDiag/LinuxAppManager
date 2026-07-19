@@ -151,10 +151,10 @@ fn download(src: &Source, latest: &Latest) -> Result<PathBuf> {
 
     let mut reader: Box<dyn std::io::Read + Send> =
         if url.starts_with("https://api.github.com/") {
-            // Authenticated release-asset download. Ask for the raw bytes with
-            // the token, but DON'T auto-follow: the 302 points at a pre-signed
-            // URL that rejects a stray Authorization header, so we fetch the
-            // Location ourselves, unauthenticated.
+            // Release-asset download via the API URL. Ask for the raw bytes,
+            // but DON'T auto-follow: the 302 points at a pre-signed URL that
+            // rejects a stray Authorization header, so we fetch the Location
+            // ourselves, unauthenticated. (Public repos need no token.)
             let agent = ureq::builder().redirects(0).build();
             let mut req = agent
                 .get(url)
