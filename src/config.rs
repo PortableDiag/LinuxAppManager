@@ -119,6 +119,13 @@ const DEFAULT_SOURCES: &str = r#"[
 ]
 "#;
 
+/// Remove a source from the list by id.
+pub fn remove_source(id: &str) -> Result<()> {
+    let mut srcs = load_sources()?;
+    srcs.retain(|s| s.id != id);
+    save_sources(&srcs)
+}
+
 /// Flip a single source's auto-update flag and save.
 pub fn set_auto_update(id: &str, on: bool) -> Result<()> {
     let mut srcs = load_sources()?;

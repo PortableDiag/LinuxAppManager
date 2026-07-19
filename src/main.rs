@@ -240,7 +240,7 @@ fn build_ui(app: &adw::Application) {
     let ui_btn = ui.clone();
     refresh_btn.connect_clicked(move |_| refresh(ui_btn.clone()));
     let ui_add = ui.clone();
-    add_btn.connect_clicked(move |_| add_source_dialog(&ui_add));
+    add_btn.connect_clicked(move |_| source_dialog(&ui_add, None));
     menu_btn.set_popover(Some(&import_export_menu(&ui)));
 
     // Row click → push that app's detail page.
@@ -386,11 +386,12 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
     });
     row.add_suffix(&auto);
 
-    // Remove button, when something is installed.
+    // Uninstall button, when something is installed.
     if matches!(status, Status::UpToDate | Status::UpdateAvailable | Status::Unknown) {
-        let btn = gtk::Button::with_label("Remove");
+        let btn = gtk::Button::with_label("Uninstall");
         btn.set_valign(gtk::Align::Center);
         btn.add_css_class("flat");
+        btn.set_tooltip_text(Some("Uninstall from this machine"));
         wire(&btn, ui, entry.clone(), Action::Remove);
         row.add_suffix(&btn);
     }
@@ -504,12 +505,40 @@ fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
         bx.append(&btn);
     }
     if matches!(status, Status::UpToDate | Status::UpdateAvailable | Status::Unknown) {
-        let btn = gtk::Button::with_label("Remove");
+        let btn = gtk::Button::with_label("Uninstall");
         btn.add_css_class("destructive-action");
+        btn.set_tooltip_text(Some("Remove the installed app from this machine"));
         wire_detail(&btn, ui, entry.clone(), Action::Remove);
         bx.append(&btn);
     }
     actions.add(&bx);
+
+    // Manage-source row: edit this entry, or remove it from the list.
+    let manage = adw::ActionRow::builder()
+        .title("Source")
+        .subtitle("Edit this entry or remove it from your list")
+        .build();
+    let edit_btn = gtk::Button::builder()
+        .label("Edit…")
+        .valign(gtk::Align::Center)
+        .build();
+    let ui_edit = ui.clone();
+    let src_edit = src.clone();
+    edit_btn.connect_clicked(move |_| {
+        ui_edit.nav.pop();
+        source_dialog(&ui_edit, Some(src_edit.clone()));
+    });
+    let remove_btn = gtk::Button::builder()
+        .label("Remove from list")
+        .valign(gtk::Align::Center)
+        .build();
+    remove_btn.add_css_class("destructive-action");
+    let ui_rm = ui.clone();
+    let id_rm = src.id.clone();
+    remove_btn.connect_clicked(move |_| remove_from_list(ui_rm.clone(), &id_rm));
+    manage.add_suffix(&edit_btn);
+    manage.add_suffix(&remove_btn);
+    actions.add(&manage);
 
     // Auto-update toggle.
     let auto_row = adw::ActionRow::builder()
@@ -662,15 +691,23 @@ fn toast(ui: &Rc<Ui>, text: &str) {
     ui.toasts.add_toast(adw::Toast::new(text));
 }
 
-// --- add source ------------------------------------------------------------
+// --- add / edit source -----------------------------------------------------
 
-/// Dialog to add one app: name, GitHub repo, executable/package, and kind.
-fn add_source_dialog(ui: &Rc<Ui>) {
-    let dialog = adw::MessageDialog::new(Some(&ui.window), Some("Add app"), None);
+/// Dialog to add a new app, or edit an existing one when `existing` is set
+/// (fixes a wrong kind, repo, etc.). Name, GitHub repo, executable/package,
+/// and kind.
+fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
+    let editing = existing.is_some();
+    let dialog = adw::MessageDialog::new(
+        Some(&ui.window),
+        Some(if editing { "Edit app" } else { "Add app" }),
+        None,
+    );
     dialog.add_response("cancel", "Cancel");
-    dialog.add_response("add", "Add");
-    dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("add"));
+    let ok = if editing { "save" } else { "add" };
+    dialog.add_response(ok, if editing { "Save" } else { "Add" });
+    dialog.set_response_appearance(ok, adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some(ok));
     dialog.set_close_response("cancel");
 
     let form = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -685,6 +722,21 @@ fn add_source_dialog(ui: &Rc<Ui>) {
     for w in [name_e.upcast_ref::<gtk::Widget>(), repo_e.upcast_ref(), pkg_e.upcast_ref()] {
         w.set_hexpand(true);
     }
+
+    // Prefill when editing.
+    if let Some(s) = &existing {
+        name_e.set_text(&s.name);
+        if let Origin::Github { repo } = &s.origin {
+            repo_e.set_text(repo);
+        }
+        pkg_e.set_text(s.package.as_deref().unwrap_or(""));
+        kind_dd.set_selected(match s.kind {
+            Kind::Bin => 0,
+            Kind::AppImage => 1,
+            Kind::Deb => 2,
+        });
+    }
+
     form.append(&name_e);
     form.append(&repo_e);
     form.append(&pkg_e);
@@ -693,7 +745,7 @@ fn add_source_dialog(ui: &Rc<Ui>) {
 
     let ui = ui.clone();
     dialog.connect_response(None, move |_, resp| {
-        if resp != "add" {
+        if resp != ok {
             return;
         }
         let name = name_e.text().trim().to_string();
@@ -710,17 +762,36 @@ fn add_source_dialog(ui: &Rc<Ui>) {
         };
         let id = if pkg.is_empty() { slug(&name) } else { pkg.clone() };
         let src = Source {
-            id,
+            id: id.clone(),
             name,
-            description: None,
+            // Preserve description + auto-update flag across an edit.
+            description: existing.as_ref().and_then(|e| e.description.clone()),
             kind,
             package: (!pkg.is_empty()).then_some(pkg),
             origin: Origin::Github { repo },
-            auto_update: false,
+            auto_update: existing.as_ref().map(|e| e.auto_update).unwrap_or(false),
         };
+        // If editing changed the id, drop the old entry so we don't dup it.
+        if let Some(old) = &existing {
+            if old.id != id {
+                let _ = config::remove_source(&old.id);
+            }
+        }
         apply_import(ui.clone(), vec![src]);
     });
     dialog.present();
+}
+
+/// Delete a source from the list (not the installed app), then return + refresh.
+fn remove_from_list(ui: Rc<Ui>, id: &str) {
+    match config::remove_source(id) {
+        Ok(()) => {
+            toast(&ui, "Removed from list");
+            ui.nav.pop();
+            refresh(ui);
+        }
+        Err(e) => toast(&ui, &format!("Failed: {e}")),
+    }
 }
 
 // --- import / export -------------------------------------------------------

@@ -114,29 +114,103 @@ pub fn github_token() -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
-/// Choose the release asset that matches this source's kind. deb/appimage go by
-/// extension; a `bin` app matches an asset named exactly like its executable
-/// (or any extension-less asset).
+// Arch tokens seen in release asset names. HOST is what matches this build.
+#[cfg(target_arch = "x86_64")]
+const HOST_ARCH: &[&str] = &["x86_64", "amd64", "x64"];
+#[cfg(target_arch = "aarch64")]
+const HOST_ARCH: &[&str] = &["aarch64", "arm64"];
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const HOST_ARCH: &[&str] = &[];
+
+const ARCH_TOKENS: &[&str] = &[
+    "x86_64", "amd64", "x64", "aarch64", "arm64", "armv7l", "armv7", "armhf",
+    "arm", "i686", "i386", "ppc64le", "ppc64", "s390x", "riscv64",
+];
+
+fn asset_name(a: &serde_json::Value) -> String {
+    a["name"].as_str().unwrap_or("").to_lowercase()
+}
+
+/// From assets already filtered to the right kind, pick the one for this host's
+/// architecture: prefer a name carrying a host-arch token; otherwise the first
+/// that carries no *foreign*-arch token (arch-neutral); else the first.
+fn best_by_arch<'a>(cands: &[&'a serde_json::Value]) -> Option<&'a serde_json::Value> {
+    if let Some(a) = cands
+        .iter()
+        .find(|a| HOST_ARCH.iter().any(|g| asset_name(a).contains(g)))
+    {
+        return Some(a);
+    }
+    if let Some(a) = cands.iter().find(|a| {
+        let n = asset_name(a);
+        !ARCH_TOKENS
+            .iter()
+            .any(|t| !HOST_ARCH.contains(t) && n.contains(t))
+    }) {
+        return Some(a);
+    }
+    cands.first().copied()
+}
+
+/// Choose the release asset that matches this source's kind and host arch.
+/// deb/appimage go by extension; a `bin` app matches an asset named exactly
+/// like its executable (or any extension-less asset).
 fn pick_asset<'a>(assets: &'a [serde_json::Value], src: &Source) -> Option<&'a serde_json::Value> {
-    match src.kind {
+    let cands: Vec<&serde_json::Value> = match src.kind {
         Kind::Deb | Kind::AppImage => {
             let ext = src.kind.ext();
-            assets.iter().find(|a| {
-                a["name"]
-                    .as_str()
-                    .map(|n| n.to_lowercase().ends_with(ext))
-                    .unwrap_or(false)
-            })
+            assets
+                .iter()
+                .filter(|a| asset_name(a).ends_with(ext))
+                .collect()
         }
         Kind::Bin => {
             let exec = src.package_name();
-            assets.iter().find(|a| {
-                a["name"]
-                    .as_str()
-                    .map(|n| n == exec || !n.contains('.'))
-                    .unwrap_or(false)
-            })
+            // An exact executable-name match wins outright.
+            if let Some(a) = assets.iter().find(|a| a["name"].as_str() == Some(exec)) {
+                return Some(a);
+            }
+            assets
+                .iter()
+                .filter(|a| !asset_name(a).contains('.'))
+                .collect()
         }
+    };
+    best_by_arch(&cands)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Kind, Origin, Source};
+
+    fn assets(names: &[&str]) -> Vec<serde_json::Value> {
+        names
+            .iter()
+            .map(|n| serde_json::json!({ "name": n }))
+            .collect()
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn picks_host_arch_deb() {
+        let src = Source {
+            id: "tabby".into(),
+            name: "Tabby".into(),
+            description: None,
+            kind: Kind::Deb,
+            origin: Origin::Github { repo: "Eugeny/tabby".into() },
+            package: Some("tabby".into()),
+            auto_update: false,
+        };
+        // arm64 deb listed first must NOT win on x86_64.
+        let a = assets(&[
+            "tabby-1.0-linux-arm64.deb",
+            "tabby-1.0-linux-armv7l.deb",
+            "tabby-1.0-linux-x64.deb",
+        ]);
+        let picked = pick_asset(&a, &src).unwrap();
+        assert_eq!(picked["name"], "tabby-1.0-linux-x64.deb");
     }
 }
 
