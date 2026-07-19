@@ -47,47 +47,75 @@ pub fn install_self() -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// Installed version, or `None` if not present.
+/// Installed version, or `None` if not present. Detection is method-agnostic:
+/// it probes every way an app could be installed (custom path, dpkg,
+/// ~/.local/bin, ~/Applications, PATH) and reports the first hit — so an app is
+/// found however it actually got there, regardless of its declared `kind`.
+/// (The `kind` still governs how install/update fetches it.)
 pub fn detect_installed(src: &Source) -> Option<String> {
-    match src.kind {
-        Kind::Deb => {
-            let out = Command::new("dpkg-query")
-                .args(["-W", "-f=${Version}", src.package_name()])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
+    // 1. An explicit custom path is authoritative for this app.
+    if let Some(p) = src
+        .install_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        return expand_tilde(p).exists().then(|| sidecar_or_unknown(src));
+    }
+
+    // 2. A real dpkg package gives a real version — prefer it.
+    if let Some(v) = dpkg_version(src.package_name()) {
+        return Some(v);
+    }
+
+    // 3. A managed binary/AppImage we (or the user) put in the usual spots.
+    if config::localbin_dir().join(src.package_name()).exists()
+        || config::appimage_dir()
+            .join(format!("{}.AppImage", src.id))
+            .exists()
+    {
+        return Some(sidecar_or_unknown(src));
+    }
+
+    // 4. Anything else reachable on $PATH (e.g. /usr/bin, /usr/local/bin).
+    if on_path(src.package_name()) {
+        return Some(crate::model::UNKNOWN_VERSION.to_string());
+    }
+
+    None
+}
+
+/// dpkg-recorded version of a package, if installed.
+fn dpkg_version(pkg: &str) -> Option<String> {
+    let out = Command::new("dpkg-query")
+        .args(["-W", "-f=${Version}", pkg])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+/// Recorded version from either sidecar, else the "unknown" sentinel.
+fn sidecar_or_unknown(src: &Source) -> String {
+    for p in [bin_sidecar(src), version_sidecar(src)] {
+        if let Ok(s) = std::fs::read_to_string(&p) {
+            let s = s.trim();
+            if !s.is_empty() {
+                return s.to_string();
             }
-            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            (!v.is_empty()).then_some(v)
-        }
-        Kind::AppImage => {
-            // Recorded version, else "unknown" if the AppImage is present but
-            // we didn't install it (matches bin behaviour).
-            std::fs::read_to_string(version_sidecar(src))
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    appimage_path(src)
-                        .exists()
-                        .then(|| crate::model::UNKNOWN_VERSION.to_string())
-                })
-        }
-        Kind::Bin => {
-            if !bin_path(src).exists() {
-                return None;
-            }
-            // Binary is present; report the recorded version, else "unknown".
-            Some(
-                std::fs::read_to_string(bin_sidecar(src))
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| crate::model::UNKNOWN_VERSION.to_string()),
-            )
         }
     }
+    crate::model::UNKNOWN_VERSION.to_string()
+}
+
+/// Whether an executable named `name` sits in any $PATH directory.
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|d| d.join(name).is_file()))
+        .unwrap_or(false)
 }
 
 /// Download the latest release and install/update it.
