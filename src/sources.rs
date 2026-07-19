@@ -152,6 +152,25 @@ fn best_by_arch<'a>(cands: &[&'a serde_json::Value]) -> Option<&'a serde_json::V
     cands.first().copied()
 }
 
+/// Like `best_by_arch` but strict: no "else first" fallback. Returns a match
+/// only if there's a host-arch asset or a truly arch-neutral one (no arch token
+/// at all). Used to decide whether a repo is installable on this host.
+fn best_by_arch_strict<'a>(cands: &[&'a serde_json::Value]) -> Option<&'a serde_json::Value> {
+    if let Some(a) = cands
+        .iter()
+        .find(|a| HOST_ARCH.iter().any(|g| asset_name(a).contains(g)))
+    {
+        return Some(a);
+    }
+    cands
+        .iter()
+        .find(|a| {
+            let n = asset_name(a);
+            !ARCH_TOKENS.iter().any(|t| n.contains(t))
+        })
+        .copied()
+}
+
 /// Choose the release asset that matches this source's kind and host arch.
 /// deb/appimage go by extension; a `bin` app matches an asset named exactly
 /// like its executable (or any extension-less asset).
@@ -177,6 +196,161 @@ fn pick_asset<'a>(assets: &'a [serde_json::Value], src: &Source) -> Option<&'a s
         }
     };
     best_by_arch(&cands)
+}
+
+/// Enumerate an account's repos (the token owner's own — incl. private — plus
+/// the named user's public repos), then keep those whose latest release has an
+/// asset installable on this host, auto-detecting the kind. Network-heavy: one
+/// release lookup per repo.
+pub fn follow_user(user: &str) -> Result<Vec<Source>> {
+    let user = user
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("github.com/")
+        .trim_matches('/')
+        .to_string();
+    if user.is_empty() {
+        return Err(anyhow::anyhow!("no username given"));
+    }
+
+    // The token owner's own repos (public + private), filtered to this account.
+    let mut repos = gh_repo_pages("https://api.github.com/user/repos?affiliation=owner");
+    repos.retain(|r| {
+        r["owner"]["login"]
+            .as_str()
+            .map(|l| l.eq_ignore_ascii_case(&user))
+            .unwrap_or(false)
+    });
+    // Plus the user's public repos (covers other people's accounts).
+    let mut seen: std::collections::HashSet<String> = repos
+        .iter()
+        .filter_map(|r| r["full_name"].as_str().map(str::to_string))
+        .collect();
+    for r in gh_repo_pages(&format!("https://api.github.com/users/{user}/repos")) {
+        if let Some(f) = r["full_name"].as_str() {
+            if seen.insert(f.to_string()) {
+                repos.push(r);
+            }
+        }
+    }
+    if repos.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no repos found for '{user}' (private repos need your gh token)"
+        ));
+    }
+
+    // Don't re-add repos already tracked (even under a different id, e.g. a
+    // curated com.procomputation.* entry pointing at the same GitHub repo).
+    let already: std::collections::HashSet<String> = config::load_sources()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| match &s.origin {
+            Origin::Github { repo } => Some(repo.to_lowercase()),
+            _ => None,
+        })
+        .collect();
+
+    // Candidates: not already tracked, valid name/full_name.
+    let candidates: Vec<(String, String, Option<String>)> = repos
+        .iter()
+        .filter_map(|r| {
+            let full = r["full_name"].as_str()?;
+            let name = r["name"].as_str()?;
+            if already.contains(&full.to_lowercase()) {
+                return None;
+            }
+            Some((full.to_string(), name.to_string(), r["description"].as_str().map(str::to_string)))
+        })
+        .collect();
+
+    // One release lookup per repo — do them in parallel so a big account
+    // doesn't take minutes.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let out = Mutex::new(Vec::new());
+    let next = AtomicUsize::new(0);
+    let workers = candidates.len().min(8).max(1);
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some((full, name, desc)) = candidates.get(i) else { break };
+                if let Some(kind) = detect_installable(full, name) {
+                    out.lock().unwrap().push(Source {
+                        id: name.clone(),
+                        name: name.clone(),
+                        description: desc.clone(),
+                        kind,
+                        package: Some(name.clone()),
+                        origin: Origin::Github { repo: full.clone() },
+                        auto_update: false,
+                    });
+                }
+            });
+        }
+    });
+    Ok(out.into_inner().unwrap())
+}
+
+/// Fetch up to 1000 repos from a paginated /repos endpoint (best effort).
+fn gh_repo_pages(base: &str) -> Vec<serde_json::Value> {
+    let sep = if base.contains('?') { '&' } else { '?' };
+    let mut out = Vec::new();
+    for page in 1..=10 {
+        let url = format!("{base}{sep}per_page=100&page={page}");
+        let mut req = ureq::get(&url)
+            .set("User-Agent", "LinuxAppManager")
+            .set("Accept", "application/vnd.github+json");
+        if let Some(t) = github_token() {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        let Ok(resp) = req.call() else { break };
+        let Ok(json) = resp.into_json::<serde_json::Value>() else { break };
+        let items = json.as_array().cloned().unwrap_or_default();
+        let n = items.len();
+        out.extend(items);
+        if n < 100 {
+            break;
+        }
+    }
+    out
+}
+
+/// The installable kind for a repo's latest release, if any (arch-strict).
+/// Preference: a bare binary named like the repo, then AppImage, then deb.
+fn detect_installable(repo: &str, exec: &str) -> Option<Kind> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let mut req = ureq::get(&url)
+        .set("User-Agent", "LinuxAppManager")
+        .set("Accept", "application/vnd.github+json");
+    if let Some(t) = github_token() {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let json: serde_json::Value = req.call().ok()?.into_json().ok()?;
+    let assets = json["assets"].as_array()?;
+
+    let bin_exact: Vec<&serde_json::Value> =
+        assets.iter().filter(|a| a["name"].as_str() == Some(exec)).collect();
+    if best_by_arch_strict(&bin_exact).is_some() {
+        return Some(Kind::Bin);
+    }
+    let appimg: Vec<&serde_json::Value> =
+        assets.iter().filter(|a| asset_name(a).ends_with(".appimage")).collect();
+    if best_by_arch_strict(&appimg).is_some() {
+        return Some(Kind::AppImage);
+    }
+    let debs: Vec<&serde_json::Value> =
+        assets.iter().filter(|a| asset_name(a).ends_with(".deb")).collect();
+    if best_by_arch_strict(&debs).is_some() {
+        return Some(Kind::Deb);
+    }
+    let nodot: Vec<&serde_json::Value> =
+        assets.iter().filter(|a| !asset_name(a).contains('.')).collect();
+    if best_by_arch_strict(&nodot).is_some() {
+        return Some(Kind::Bin);
+    }
+    None
 }
 
 #[cfg(test)]

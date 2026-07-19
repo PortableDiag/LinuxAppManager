@@ -85,6 +85,13 @@ fn run_cli() -> Option<glib::ExitCode> {
                 glib::ExitCode::FAILURE
             }
         }
+        "--follow-user" => match args.get(1) {
+            Some(user) => cli_import(sources::follow_user(user)),
+            None => {
+                eprintln!("--follow-user needs a GitHub username");
+                glib::ExitCode::FAILURE
+            }
+        },
         "--import-official" => cli_import(sources::fetch_official()),
         "--import" => match args.get(1) {
             Some(path) => {
@@ -158,6 +165,7 @@ fn print_usage() {
          linux-app-manager                 launch the GUI\n  \
          linux-app-manager --list          print the catalog (installed vs latest)\n  \
          linux-app-manager --auto-update   install pending updates for auto-update apps\n  \
+         linux-app-manager --follow-user <u>   add a GitHub user's installable repos\n  \
          linux-app-manager --import-official   merge the repo's official list\n  \
          linux-app-manager --import <file>     merge a config/sources file\n  \
          linux-app-manager --export <file>     write your list as a shareable config\n  \
@@ -291,7 +299,8 @@ fn import_export_menu(ui: &Rc<Ui>) -> gtk::Popover {
     vbox.set_margin_start(6);
     vbox.set_margin_end(6);
 
-    let items: [(&str, fn(Rc<Ui>)); 3] = [
+    let items: [(&str, fn(Rc<Ui>)); 4] = [
+        ("Follow GitHub user…", follow_user_dialog),
         ("Import official list", import_official),
         ("Import from file…", import_file),
         ("Export config…", export_file),
@@ -778,6 +787,52 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
             }
         }
         apply_import(ui.clone(), vec![src]);
+    });
+    dialog.present();
+}
+
+/// Ask for a GitHub username, then add all their installable repos.
+fn follow_user_dialog(ui: Rc<Ui>) {
+    let dialog = adw::MessageDialog::new(
+        Some(&ui.window),
+        Some("Follow a GitHub user"),
+        Some("Adds every repo of theirs that has a release installable on this machine."),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("go", "Add apps");
+    dialog.set_response_appearance("go", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("go"));
+    dialog.set_close_response("cancel");
+
+    let entry = gtk::Entry::builder()
+        .placeholder_text("GitHub username")
+        .activates_default(true)
+        .build();
+    dialog.set_extra_child(Some(&entry));
+
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "go" {
+            return;
+        }
+        let user = entry.text().trim().to_string();
+        if user.is_empty() {
+            toast(&ui, "Enter a username");
+            return;
+        }
+        toast(&ui, &format!("Scanning {user}'s repos…"));
+        let ui2 = ui.clone();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(sources::follow_user(&user));
+        });
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(list)) if list.is_empty() => toast(&ui2, "No installable repos found"),
+                Ok(Ok(list)) => apply_import(ui2, list),
+                Ok(Err(e)) => toast(&ui2, &format!("Follow failed: {e}")),
+                Err(_) => {}
+            }
+        });
     });
     dialog.present();
 }
