@@ -68,6 +68,20 @@ Each source is one app:
 On first run a default `sources.json` is written that contains **only App Manager itself**,
 so it can update itself out of the box.
 
+### Adding apps & sharing the list
+
+- **＋ (header)** — add one app from a dialog: name, GitHub `owner/repo`,
+  executable/package name, and kind.
+- **▾ menu (header):**
+  - **Import official list** — pulls the curated `official-config.json` from this
+    repo (works for the private repo via your `gh` token) and merges it in.
+  - **Import from file…** — load a `sources.json` or exported config someone shared.
+  - **Export config…** — write your list as a shareable `{version, sources}` file
+    (drop it straight into a repo as an official list).
+
+Imports **merge by `id`** — incoming entries add or replace, existing ones stay.
+`kind` is one of `bin` / `appimage` / `deb`.
+
 ---
 
 ## Build

@@ -2,6 +2,18 @@
 
 ## 0.1.0 — unreleased
 
+Later in 0.1.0 dev:
+
+- **`bin` backend** — single executables in `~/.local/bin`, version tracked in a
+  config sidecar; `--list` flag dumps the catalog headlessly.
+- **Private-repo auth** — GitHub API calls send `$GITHUB_TOKEN`/`$GH_TOKEN` or
+  the `gh auth token`, so private repos resolve.
+- **Sharing / config** — `official-config.json` in the repo as the curated list;
+  header ▾ menu with **Import official list / Import from file / Export config**;
+  a **+ Add app** dialog. Import merges by `id`. Toasts via AdwToastOverlay.
+
+Initial skeleton:
+
 First working skeleton. The Linux twin of the Android App Manager.
 
 - Catalog list: installed-vs-latest per app, mirroring the Android phrasing
