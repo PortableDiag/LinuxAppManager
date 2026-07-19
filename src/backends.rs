@@ -193,9 +193,10 @@ fn install_bin(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
             src.name
         ));
     }
-    let dir = config::localbin_dir();
-    std::fs::create_dir_all(&dir)?;
     let dest = bin_path(src);
+    // Install into the binary's own directory (custom path or ~/.local/bin).
+    let dir = dest.parent().map(|p| p.to_path_buf()).unwrap_or_else(config::localbin_dir);
+    std::fs::create_dir_all(&dir)?;
     // Stage next to the target, then atomically rename over it. A plain copy
     // fails with ETXTBSY when replacing a running executable (e.g. the manager
     // updating itself); rename swaps the dir entry and leaves the running
@@ -253,8 +254,26 @@ fn desktop_path(src: &Source) -> PathBuf {
     config::desktop_dir().join(format!("{}.desktop", src.id))
 }
 
+/// Where a `bin` app's executable lives: its custom `install_path` if set,
+/// otherwise ~/.local/bin/<package>.
 fn bin_path(src: &Source) -> PathBuf {
-    config::localbin_dir().join(src.package_name())
+    match &src.install_path {
+        Some(p) if !p.trim().is_empty() => expand_tilde(p.trim()),
+        _ => config::localbin_dir().join(src.package_name()),
+    }
+}
+
+/// Expand a leading `~/` (or bare `~`) to the home directory.
+fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(rest);
+    }
+    PathBuf::from(path)
 }
 
 fn bin_sidecar(src: &Source) -> PathBuf {

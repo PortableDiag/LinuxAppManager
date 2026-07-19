@@ -464,6 +464,9 @@ fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
     }
     add_row("Kind", kind_text(src.kind));
     add_row("Source", &origin_text(&src.origin));
+    if let Some(p) = src.install_path.as_deref().filter(|p| !p.trim().is_empty()) {
+        add_row("Path", p);
+    }
     prefs.add(&details);
 
     // Release notes / changelog.
@@ -727,8 +730,16 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
     let pkg_e = gtk::Entry::builder()
         .placeholder_text("Executable / package name")
         .build();
+    let path_e = gtk::Entry::builder()
+        .placeholder_text("bin path (optional, e.g. ~/App or /media/…/app)")
+        .build();
     let kind_dd = gtk::DropDown::from_strings(&["bin", "appimage", "deb"]);
-    for w in [name_e.upcast_ref::<gtk::Widget>(), repo_e.upcast_ref(), pkg_e.upcast_ref()] {
+    for w in [
+        name_e.upcast_ref::<gtk::Widget>(),
+        repo_e.upcast_ref(),
+        pkg_e.upcast_ref(),
+        path_e.upcast_ref(),
+    ] {
         w.set_hexpand(true);
     }
 
@@ -739,6 +750,7 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
             repo_e.set_text(repo);
         }
         pkg_e.set_text(s.package.as_deref().unwrap_or(""));
+        path_e.set_text(s.install_path.as_deref().unwrap_or(""));
         kind_dd.set_selected(match s.kind {
             Kind::Bin => 0,
             Kind::AppImage => 1,
@@ -749,6 +761,7 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
     form.append(&name_e);
     form.append(&repo_e);
     form.append(&pkg_e);
+    form.append(&path_e);
     form.append(&kind_dd);
     dialog.set_extra_child(Some(&form));
 
@@ -760,6 +773,7 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
         let name = name_e.text().trim().to_string();
         let repo = normalize_repo(&repo_e.text());
         let pkg = pkg_e.text().trim().to_string();
+        let path = path_e.text().trim().to_string();
         if name.is_empty() || repo.is_empty() {
             toast(&ui, "Name and GitHub repo are required");
             return;
@@ -777,6 +791,7 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
             description: existing.as_ref().and_then(|e| e.description.clone()),
             kind,
             package: (!pkg.is_empty()).then_some(pkg),
+            install_path: (!path.is_empty()).then_some(path),
             origin: Origin::Github { repo },
             auto_update: existing.as_ref().map(|e| e.auto_update).unwrap_or(false),
         };

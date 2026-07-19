@@ -52,6 +52,11 @@ pub struct Source {
     /// For `deb`: the dpkg package to query, if different from `id`.
     #[serde(default)]
     pub package: Option<String>,
+    /// For `bin`: where the executable lives / installs. Overrides the default
+    /// `~/.local/bin/<package>`. A leading `~/` expands to the home dir. Lets
+    /// App Manager track a binary you keep in a custom location.
+    #[serde(default)]
+    pub install_path: Option<String>,
     /// Install updates automatically (on startup / on the background pass).
     /// Off by default; the manager enables it for itself.
     #[serde(default)]

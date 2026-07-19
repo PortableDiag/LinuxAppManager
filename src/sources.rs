@@ -283,6 +283,7 @@ pub fn follow_user(user: &str) -> Result<Vec<Source>> {
                         description: desc.clone(),
                         kind,
                         package: Some(name.clone()),
+                        install_path: None,
                         origin: Origin::Github { repo: full.clone() },
                         auto_update: false,
                     });
@@ -375,6 +376,7 @@ mod tests {
             kind: Kind::Deb,
             origin: Origin::Github { repo: "Eugeny/tabby".into() },
             package: Some("tabby".into()),
+            install_path: None,
             auto_update: false,
         };
         // arm64 deb listed first must NOT win on x86_64.
