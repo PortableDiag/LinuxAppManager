@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3 — 2026-07-19
+
+- **Quick add** — ＋ Add takes a single GitHub repo/URL and auto-detects the
+  name, description, and installable kind (with a "Manual…" fallback). Also
+  `--add <repo>`.
+- **Self-install** — running a loose binary (USB, repo dir, fresh download)
+  offers to install itself into `~/.local/bin` by copying the running
+  executable — offline, no download — with an embedded icon + menu entry. Also
+  `--install-self`.
+
 ## 0.1.2 — 2026-07-19
 
 - **Follow a GitHub user** — enumerate an account's repos (your own private ones
