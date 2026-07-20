@@ -96,6 +96,39 @@ cargo build --release
 Builds go to `~/.cache/cargo-target/linux-app-manager` (the source lives on an exfat
 volume, which lacks the file locking cargo needs — see `.cargo/config.toml`).
 
+### Runtime dependencies
+
+The binary is dynamically linked against the GTK4 and libadwaita **runtime** libraries
+(`libgtk-4-1`, `libadwaita-1-0`) — distinct from the `-dev` packages above. GNOME
+desktops already have them; a fresh **KDE / Kubuntu (Plasma)** box usually does **not**
+ship libadwaita, so the app dies on launch with:
+
+```
+libadwaita-1.so.0: cannot open shared object file: No such file or directory
+```
+
+`scripts/install.sh` detects and installs any missing runtime libs for you (via
+pkexec/apt). To do it by hand:
+
+```bash
+sudo apt install libgtk-4-1 libadwaita-1-0
+```
+
+### Self-contained build (no system libraries)
+
+To run on a machine where you **won't** install GTK/libadwaita — e.g. a KDE box you
+don't want to pollute — build a single-file AppImage that carries the entire GTK4 +
+libadwaita stack with it:
+
+```bash
+scripts/build-appimage.sh          # → dist/LinuxAppManager-x86_64.AppImage
+```
+
+Copy that one file to the other machine, `chmod +x`, and run it. Nothing is installed
+system-wide; it uses its own bundled libraries. (The build assembles under `~/.cache`
+because the repo's exfat volume can't hold the symlinks an AppDir needs; only the
+finished `.AppImage` lands back in `dist/`.)
+
 ---
 
 ## Roadmap

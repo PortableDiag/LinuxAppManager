@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.5 — 2026-07-20
+
+- **Self-contained AppImage** — `scripts/build-appimage.sh` bundles the whole
+  GTK4 + libadwaita stack (~100 shared objects, pixbuf loaders, GIO modules,
+  icon theme, gsettings schemas) into one `dist/LinuxAppManager-x86_64.AppImage`.
+  Copy it to any distro and run — **no system packages on the target**. Fixes a
+  fresh **KDE / Kubuntu** box dying on `libadwaita-1.so.0: cannot open shared
+  object file` (Plasma doesn't ship libadwaita) without touching the target's
+  package set. Verified: libadwaita/gtk-4 resolve to the bundled copies and the
+  binary loads and runs.
+- **Runtime-dependency preflight** — for the apt-based install path,
+  `scripts/install.sh` checks for `libgtk-4-1` / `libadwaita-1-0` and installs
+  any that are missing via pkexec/apt. README documents both paths.
+
 ## 0.1.4 — 2026-07-19
 
 - **Public-only auth** — App Manager never reads your `gh` login; it uses the

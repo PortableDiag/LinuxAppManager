@@ -13,6 +13,40 @@ find_asset() {  # echo first existing candidate for filename $1
   return 1
 }
 
+# Ensure the GTK4 + libadwaita *runtime* shared libraries are present. These are
+# separate from the -dev packages you build against, and libadwaita in particular
+# is a GNOME lib that KDE/Kubuntu does not ship by default — a fresh Plasma box
+# launches the binary only to die on "libadwaita-1.so.0: cannot open shared object
+# file". Install whatever is missing via apt, behind the same polkit/pkexec path
+# the app already uses for .deb installs. Non-dpkg systems are skipped silently.
+ensure_runtime_deps() {
+  command -v dpkg-query >/dev/null 2>&1 || return 0
+  local pkgs=(libgtk-4-1 libadwaita-1-0) missing=()
+  for p in "${pkgs[@]}"; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" \
+      || missing+=("$p")
+  done
+  [ ${#missing[@]} -eq 0 ] && return 0
+
+  echo "Missing runtime libraries: ${missing[*]}"
+  local runner=""
+  if [ "$(id -u)" = 0 ]; then runner=""
+  elif command -v pkexec >/dev/null 2>&1; then runner="pkexec"
+  elif command -v sudo   >/dev/null 2>&1; then runner="sudo"
+  else
+    echo "error: cannot elevate to install ${missing[*]}." >&2
+    echo "  Run manually: sudo apt install ${missing[*]}" >&2
+    exit 1
+  fi
+
+  echo "Installing them with apt (${runner:-root})…"
+  if ! $runner apt-get install -y "${missing[@]}"; then
+    echo "error: failed to install ${missing[*]}." >&2
+    echo "  Run manually: sudo apt install ${missing[*]}" >&2
+    exit 1
+  fi
+}
+
 BIN=""
 for c in "$HERE/linux-app-manager" \
          "$HOME/.cache/cargo-target/linux-app-manager/release/linux-app-manager" \
@@ -22,6 +56,8 @@ done
 [ -n "$BIN" ] || { echo "error: linux-app-manager binary not found next to the installer" >&2; exit 1; }
 ICON="$(find_asset "$APP_ID.svg")"     || { echo "error: $APP_ID.svg not found" >&2; exit 1; }
 DESK="$(find_asset "$APP_ID.desktop")" || { echo "error: $APP_ID.desktop not found" >&2; exit 1; }
+
+ensure_runtime_deps
 
 BIN_DIR="$HOME/.local/bin"
 ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
