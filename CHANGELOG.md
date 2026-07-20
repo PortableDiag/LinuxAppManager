@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.6 — 2026-07-20
+
+- **Tarball releases** — a new `tar` kind installs apps shipped as
+  `.tar.gz`/`.tar.xz`/`.tar.zst` archives (the cargo-dist / common Rust layout):
+  it downloads, extracts, finds the executable inside, and drops it in
+  `~/.local/bin` — no root, version tracked in a sidecar, managed like `bin`
+  after that. **Fix:** Follow-GitHub-user and quick-add now surface repos whose
+  only release asset is a tarball (e.g. `riptide`), which were previously
+  detected as uninstallable and silently dropped from the list.
+
 ## 0.1.5 — 2026-07-20
 
 - **Self-contained AppImage** — `scripts/build-appimage.sh` bundles the whole

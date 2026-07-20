@@ -11,7 +11,7 @@ use crate::model::{Kind, Latest, Source};
 use anyhow::{anyhow, Context, Result};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // Embedded so a loose binary (USB / fresh download) can install itself with its
@@ -126,6 +126,7 @@ pub fn install(src: &Source, latest: &Latest) -> Result<()> {
         Kind::Deb => install_deb(&file),
         Kind::AppImage => install_appimage(src, latest, &file),
         Kind::Bin => install_bin(src, latest, &file),
+        Kind::Tar => install_tar(src, latest, &file),
     }
 }
 
@@ -139,7 +140,8 @@ pub fn remove(src: &Source) -> Result<()> {
             let _ = std::fs::remove_file(desktop_path(src));
             Ok(())
         }
-        Kind::Bin => {
+        // Tar apps land as a single binary in ~/.local/bin, same as Bin.
+        Kind::Bin | Kind::Tar => {
             let _ = std::fs::remove_file(bin_path(src));
             let _ = std::fs::remove_file(bin_sidecar(src));
             Ok(())
@@ -156,7 +158,7 @@ pub fn open(src: &Source) -> Result<()> {
                 .context("launching AppImage")?;
             Ok(())
         }
-        Kind::Bin => {
+        Kind::Bin | Kind::Tar => {
             Command::new(bin_path(src))
                 .spawn()
                 .context("launching binary")?;
@@ -279,6 +281,106 @@ fn install_bin(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
     }
     record_bin_version(src, &latest.version)?;
     Ok(())
+}
+
+/// Extract a release tarball and install the executable it contains, then
+/// manage it exactly like a `bin` app. Uses the system `tar`, which
+/// auto-detects gzip/xz/zstd/bzip2 from the archive itself.
+fn install_tar(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
+    if latest.download_url.is_empty() {
+        return Err(anyhow!(
+            "{} has no downloadable release tarball",
+            src.name
+        ));
+    }
+    let workdir = config::cache_dir().join(format!(".{}.extract", src.id));
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir)?;
+
+    let status = Command::new("tar")
+        .arg("-xf")
+        .arg(file)
+        .arg("-C")
+        .arg(&workdir)
+        .status()
+        .context("tar not available")?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&workdir);
+        return Err(anyhow!("failed to extract {}", file.display()));
+    }
+
+    let exec = find_executable(&workdir, src.package_name()).ok_or_else(|| {
+        anyhow!(
+            "no executable named '{}' found in the {} tarball",
+            src.package_name(),
+            src.name
+        )
+    })?;
+
+    // Atomic rename into place, same as install_bin (ETXTBSY-safe self-update).
+    let dest = bin_path(src);
+    let dir = dest
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(config::localbin_dir);
+    std::fs::create_dir_all(&dir)?;
+    let staged = dir.join(format!(".{}.new", src.package_name()));
+    std::fs::copy(&exec, &staged)?;
+    let mut perms = std::fs::metadata(&staged)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&staged, perms)?;
+    std::fs::rename(&staged, &dest)?;
+
+    let _ = std::fs::remove_dir_all(&workdir);
+    if file.starts_with(config::cache_dir()) {
+        let _ = std::fs::remove_file(file);
+    }
+    record_bin_version(src, &latest.version)?;
+    Ok(())
+}
+
+/// Find the binary to install inside an extracted tarball tree. Prefers a file
+/// named exactly like the package, then any executable extension-less file
+/// (cargo-dist ships `name-vX-target/name`), then a lone file if that's all
+/// there is.
+fn find_executable(root: &Path, package: &str) -> Option<PathBuf> {
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    if let Some(p) = files
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(package))
+    {
+        return Some(p.clone());
+    }
+    if let Some(p) = files.iter().find(|p| {
+        let is_exec = std::fs::metadata(p)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+        let no_ext = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| !n.contains('.'))
+            .unwrap_or(false);
+        is_exec && no_ext
+    }) {
+        return Some(p.clone());
+    }
+    (files.len() == 1).then(|| files[0].clone())
+}
+
+/// Collect every regular file under `dir`, recursively.
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_files(&p, out);
+        } else if p.is_file() {
+            out.push(p);
+        }
+    }
 }
 
 /// Write a `bin` app's installed-version sidecar. Public so the UI/CLI can

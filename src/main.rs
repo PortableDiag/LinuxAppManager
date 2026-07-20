@@ -701,6 +701,7 @@ fn kind_text(k: Kind) -> &'static str {
         Kind::Bin => "Executable (~/.local/bin)",
         Kind::AppImage => "AppImage (~/Applications)",
         Kind::Deb => "Debian package (apt)",
+        Kind::Tar => "Tarball (~/.local/bin)",
     }
 }
 
@@ -875,7 +876,7 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
     let path_e = gtk::Entry::builder()
         .placeholder_text("bin path (optional, e.g. ~/App or /media/…/app)")
         .build();
-    let kind_dd = gtk::DropDown::from_strings(&["bin", "appimage", "deb"]);
+    let kind_dd = gtk::DropDown::from_strings(&["bin", "appimage", "deb", "tar"]);
     for w in [
         name_e.upcast_ref::<gtk::Widget>(),
         repo_e.upcast_ref(),
@@ -897,6 +898,7 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
             Kind::Bin => 0,
             Kind::AppImage => 1,
             Kind::Deb => 2,
+            Kind::Tar => 3,
         });
     }
 
@@ -923,6 +925,7 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
         let kind = match kind_dd.selected() {
             1 => Kind::AppImage,
             2 => Kind::Deb,
+            3 => Kind::Tar,
             _ => Kind::Bin,
         };
         let id = if pkg.is_empty() { slug(&name) } else { pkg.clone() };

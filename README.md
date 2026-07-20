@@ -27,6 +27,9 @@ Like the Android version, **App Manager shows up in its own list and updates its
     `dpkg-query`.
   - **`appimage`** — dropped in `~/Applications`, marked executable, given a `.desktop`
     launcher, no root. Installed version tracked in a `.version` sidecar.
+  - **`tar`** — a `.tar.gz`/`.tar.xz`/`.tar.zst` release archive (the cargo-dist /
+    common Rust layout). The executable is extracted out of it into `~/.local/bin`,
+    no root, version tracked in a sidecar — managed like `bin` from there on.
 - **Refresh** re-reads the catalog and re-checks what's installed.
 
 It never phones home. The only network it touches is the source URLs **you** give it.
@@ -80,7 +83,7 @@ so it can update itself out of the box.
     (drop it straight into a repo as an official list).
 
 Imports **merge by `id`** — incoming entries add or replace, existing ones stay.
-`kind` is one of `bin` / `appimage` / `deb`.
+`kind` is one of `bin` / `appimage` / `deb` / `tar`.
 
 ---
 
@@ -137,7 +140,7 @@ Shipped in **v0.1**: GitHub / URL / local sources, deb + AppImage backends,
 installed-vs-latest list, install / update / open / remove, refresh.
 
 Next: search / sort / filter chips, per-app detail view (changelog, size, dates),
-Update-all, background update checks (systemd user timer), tarball-binary backend,
+Update-all, background update checks (systemd user timer),
 Flatpak passthrough, in-app self-update, themes.
 
 ## License

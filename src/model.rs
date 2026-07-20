@@ -18,15 +18,21 @@ pub enum Kind {
     /// A single executable dropped in ~/.local/bin (no root). Version tracked
     /// in a sidecar; updates need a matching release asset to download.
     Bin,
+    /// A `.tar.gz`/`.tar.xz`/`.tar.zst` release archive (the cargo-dist / common
+    /// Rust layout). The executable is extracted out of it and then managed
+    /// exactly like a `bin` app (~/.local/bin, sidecar version).
+    Tar,
 }
 
 impl Kind {
-    /// Lowercase file extension used to pick a release asset (deb/appimage).
+    /// Lowercase file extension used to name the downloaded asset. Tar uses a
+    /// generic `.tar.gz` suffix — extraction auto-detects the real compression.
     pub fn ext(self) -> &'static str {
         match self {
             Kind::Deb => ".deb",
             Kind::AppImage => ".appimage",
             Kind::Bin => "",
+            Kind::Tar => ".tar.gz",
         }
     }
 }

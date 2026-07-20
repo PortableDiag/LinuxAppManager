@@ -126,6 +126,14 @@ fn asset_name(a: &serde_json::Value) -> String {
     a["name"].as_str().unwrap_or("").to_lowercase()
 }
 
+/// Whether an (already-lowercased) asset name is a binary tarball we can unpack.
+/// `.sha256`/`.asc` sidecars end differently, so they're naturally excluded.
+fn is_tarball(name: &str) -> bool {
+    [".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".tar.bz2", ".tar"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
 /// From assets already filtered to the right kind, pick the one for this host's
 /// architecture: prefer a name carrying a host-arch token; otherwise the first
 /// that carries no *foreign*-arch token (arch-neutral); else the first.
@@ -178,6 +186,10 @@ fn pick_asset<'a>(assets: &'a [serde_json::Value], src: &Source) -> Option<&'a s
                 .filter(|a| asset_name(a).ends_with(ext))
                 .collect()
         }
+        Kind::Tar => assets
+            .iter()
+            .filter(|a| is_tarball(&asset_name(a)))
+            .collect(),
         Kind::Bin => {
             let exec = src.package_name();
             // An exact executable-name match wins outright.
@@ -322,6 +334,11 @@ fn detect_installable(repo: &str, exec: &str) -> Option<Kind> {
         assets.iter().filter(|a| asset_name(a).ends_with(".deb")).collect();
     if best_by_arch_strict(&debs).is_some() {
         return Some(Kind::Deb);
+    }
+    let tars: Vec<&serde_json::Value> =
+        assets.iter().filter(|a| is_tarball(&asset_name(a))).collect();
+    if best_by_arch_strict(&tars).is_some() {
+        return Some(Kind::Tar);
     }
     let nodot: Vec<&serde_json::Value> =
         assets.iter().filter(|a| !asset_name(a).contains('.')).collect();
