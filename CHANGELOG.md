@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.7 — 2026-07-20
+
+- **Follow is now a real subscription** — "Follow GitHub user…" remembers the
+  account (in `follows.json`); App Manager re-scans followed accounts on startup
+  and on Refresh and auto-merges any **newly published** installable repos. It
+  used to be a one-shot import, so repos created after you followed never showed
+  up until you followed again. New `--discover` CLI runs the same re-scan.
+  (Network note: one release lookup per repo per followed account each scan — a
+  large or many-repo account eats into the anonymous 60-req/hour GitHub limit;
+  set `$GITHUB_TOKEN` to raise it.)
+
 ## 0.1.6 — 2026-07-20
 
 - **Tarball releases** — a new `tar` kind installs apps shipped as

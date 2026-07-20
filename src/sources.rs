@@ -283,6 +283,19 @@ pub fn follow_user(user: &str) -> Result<Vec<Source>> {
     Ok(out.into_inner().unwrap())
 }
 
+/// Re-enumerate every followed account and return installable repos that aren't
+/// tracked yet. `follow_user` already skips repos already in the list, so this
+/// yields only genuinely new apps. Network-heavy — call off the UI thread.
+pub fn discover_follows(users: &[String]) -> Vec<Source> {
+    let mut out = Vec::new();
+    for user in users {
+        if let Ok(list) = follow_user(user) {
+            out.extend(list);
+        }
+    }
+    out
+}
+
 /// Fetch up to 1000 repos from a paginated /repos endpoint (best effort).
 fn gh_repo_pages(base: &str) -> Vec<serde_json::Value> {
     let sep = if base.contains('?') { '&' } else { '?' };

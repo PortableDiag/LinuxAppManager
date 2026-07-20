@@ -76,6 +76,11 @@ so it can update itself out of the box.
 - **＋ (header)** — add one app from a dialog: name, GitHub `owner/repo`,
   executable/package name, and kind.
 - **▾ menu (header):**
+  - **Follow GitHub user…** — subscribe to an account: adds every repo of theirs
+    with a release installable on this machine. It's remembered, so **new repos
+    they publish are picked up automatically** on later startups and on Refresh
+    (not a one-time import). Followed accounts live in `follows.json`; a manual
+    re-scan is `--discover`.
   - **Import official list** — pulls the curated `official-config.json` from this
     repo (works for the private repo via your `gh` token) and merges it in.
   - **Import from file…** — load a `sources.json` or exported config someone shared.

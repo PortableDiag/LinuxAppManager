@@ -103,12 +103,27 @@ fn run_cli() -> Option<glib::ExitCode> {
             }
         },
         "--follow-user" => match args.get(1) {
-            Some(user) => cli_import(sources::follow_user(user)),
+            Some(user) => {
+                // Remember the account so new repos get auto-discovered later.
+                let _ = config::add_follow(user);
+                cli_import(sources::follow_user(user))
+            }
             None => {
                 eprintln!("--follow-user needs a GitHub username");
                 glib::ExitCode::FAILURE
             }
         },
+        "--discover" => {
+            // Re-scan every followed account for new installable repos (the same
+            // pass the GUI runs on startup/refresh).
+            let follows = config::load_follows();
+            if follows.is_empty() {
+                eprintln!("no followed users — add one with --follow-user <u>");
+                glib::ExitCode::FAILURE
+            } else {
+                cli_import(Ok(sources::discover_follows(&follows)))
+            }
+        }
         "--import-official" => cli_import(sources::fetch_official()),
         "--import" => match args.get(1) {
             Some(path) => {
@@ -184,7 +199,8 @@ fn print_usage() {
          linux-app-manager --add <repo>    add one GitHub repo/URL (auto-detected)\n  \
          linux-app-manager --install-self  install THIS binary to ~/.local/bin (+icon,menu)\n  \
          linux-app-manager --auto-update   install pending updates for auto-update apps\n  \
-         linux-app-manager --follow-user <u>   add a GitHub user's installable repos\n  \
+         linux-app-manager --follow-user <u>   follow a GitHub user's installable repos\n  \
+         linux-app-manager --discover      re-scan followed users for new repos\n  \
          linux-app-manager --import-official   merge the repo's official list\n  \
          linux-app-manager --import <file>     merge a config/sources file\n  \
          linux-app-manager --export <file>     write your list as a shareable config\n  \
@@ -265,7 +281,11 @@ fn build_ui(app: &adw::Application) {
     });
 
     let ui_btn = ui.clone();
-    refresh_btn.connect_clicked(move |_| refresh(ui_btn.clone()));
+    refresh_btn.connect_clicked(move |_| {
+        // Manual refresh also re-scans followed accounts for new repos.
+        discover_follows(ui_btn.clone());
+        refresh(ui_btn.clone());
+    });
     let ui_add = ui.clone();
     add_btn.connect_clicked(move |_| add_url_dialog(&ui_add));
     menu_btn.set_popover(Some(&import_export_menu(&ui)));
@@ -285,6 +305,7 @@ fn build_ui(app: &adw::Application) {
 
     window.present();
     refresh(ui.clone());
+    discover_follows(ui.clone());
     run_auto_update(ui);
 }
 
@@ -304,6 +325,33 @@ fn run_auto_update(ui: Rc<Ui>) {
             toast(&ui, &format!("Auto-update of {name} failed: {e}"));
         }
         if !result.updated.is_empty() {
+            refresh(ui);
+        }
+    });
+}
+
+/// Re-scan followed GitHub accounts for newly-published installable repos and
+/// merge any into the list. Network-heavy (a release lookup per repo per
+/// followed user) so it runs off the UI thread; a no-op when nothing is
+/// followed. Called on startup and when Refresh is pressed.
+fn discover_follows(ui: Rc<Ui>) {
+    let follows = config::load_follows();
+    if follows.is_empty() {
+        return;
+    }
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(sources::discover_follows(&follows));
+    });
+    glib::spawn_future_local(async move {
+        let Ok(found) = rx.recv().await else { return };
+        if found.is_empty() {
+            return;
+        }
+        let existing = config::load_sources().unwrap_or_default();
+        let (merged, added, _) = config::merge(&existing, found);
+        if added > 0 && config::save_sources(&merged).is_ok() {
+            toast(&ui, &format!("Found {added} new app(s) from followed users"));
             refresh(ui);
         }
     });
@@ -979,6 +1027,9 @@ fn follow_user_dialog(ui: Rc<Ui>) {
             toast(&ui, "Enter a username");
             return;
         }
+        // Subscribe: remembered so new repos of theirs are auto-discovered on
+        // later startups/refreshes, not just imported this once.
+        let _ = config::add_follow(&user);
         toast(&ui, &format!("Scanning {user}'s repos…"));
         let ui2 = ui.clone();
         let (tx, rx) = async_channel::bounded(1);

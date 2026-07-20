@@ -61,6 +61,36 @@ fn sources_path() -> PathBuf {
     config_dir().join("sources.json")
 }
 
+/// Followed GitHub usernames, re-scanned on startup/refresh for new repos.
+fn follows_path() -> PathBuf {
+    config_dir().join("follows.json")
+}
+
+/// The GitHub accounts the user has "followed" (subscribed to for discovery).
+pub fn load_follows() -> Vec<String> {
+    std::fs::read_to_string(follows_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Remember a followed account so future repos of theirs get auto-discovered.
+/// No-op if already followed (case-insensitive).
+pub fn add_follow(user: &str) -> Result<()> {
+    let user = user.trim();
+    if user.is_empty() {
+        return Ok(());
+    }
+    let mut list = load_follows();
+    if list.iter().any(|u| u.eq_ignore_ascii_case(user)) {
+        return Ok(());
+    }
+    list.push(user.to_string());
+    std::fs::create_dir_all(config_dir())?;
+    std::fs::write(follows_path(), serde_json::to_string_pretty(&list)?)?;
+    Ok(())
+}
+
 /// Load the source list, seeding a default file on first run.
 pub fn load_sources() -> Result<Vec<Source>> {
     let path = sources_path();
