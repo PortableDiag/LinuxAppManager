@@ -1,7 +1,7 @@
 //! Building the catalog: for each source, what's installed vs what's latest.
 
 use crate::model::{compare, Latest, Source, UNKNOWN_VERSION};
-use crate::{backends, sources};
+use crate::{backends, config, sources};
 use std::cmp::Ordering;
 
 /// One row in the app list.
@@ -84,14 +84,32 @@ impl Entry {
 }
 
 /// Query every source. Blocking (network + dpkg) — call off the UI thread.
+/// If a source's stored `kind` no longer matches its release (the author
+/// changed the packaging), it's re-detected here and the corrected list is
+/// persisted so the entry self-heals — both the returned Entry and the saved
+/// source carry the new kind, so a follow-up Install uses the right backend.
 pub fn build(srcs: &[Source]) -> Vec<Entry> {
-    srcs.iter()
-        .map(|s| Entry {
-            source: s.clone(),
-            installed: backends::detect_installed(s),
-            latest: sources::resolve_latest(s),
+    let mut list = srcs.to_vec();
+    let mut healed = false;
+    let entries = list
+        .iter_mut()
+        .map(|s| {
+            let (latest, corrected) = sources::resolve_latest(s);
+            if let Some(kind) = corrected {
+                s.kind = kind;
+                healed = true;
+            }
+            Entry {
+                source: s.clone(),
+                installed: backends::detect_installed(s),
+                latest,
+            }
         })
-        .collect()
+        .collect();
+    if healed {
+        let _ = config::save_sources(&list);
+    }
+    entries
 }
 
 /// Outcome of an auto-update pass.

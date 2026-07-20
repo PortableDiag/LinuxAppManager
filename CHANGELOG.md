@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.8 — 2026-07-20
+
+- **Self-healing `kind`** — if an app's stored `kind` no longer matches its
+  release (e.g. the author switched a cargo-dist `.tar.gz` to a bare binary),
+  App Manager now re-detects it on Refresh and updates the list automatically —
+  previously the entry silently became uninstallable until you re-added it. The
+  re-detection reuses the release data already fetched, so it costs no extra API
+  calls and only runs when the stored kind matches nothing.
+
 ## 0.1.7 — 2026-07-20
 
 - **Follow is now a real subscription** — "Follow GitHub user…" remembers the

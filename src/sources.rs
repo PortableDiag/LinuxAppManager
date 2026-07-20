@@ -6,21 +6,27 @@ use anyhow::Result;
 use std::path::Path;
 
 /// Best-effort latest release. Errors (network, rate-limit) collapse to `None`
-/// so one bad source never blanks the whole catalog.
-pub fn resolve_latest(src: &Source) -> Option<Latest> {
+/// so one bad source never blanks the whole catalog. The second tuple element
+/// is a corrected `kind` when the stored one no longer matches any release
+/// asset (e.g. the author switched a tarball release to a bare binary) — the
+/// caller persists it so the entry self-heals.
+pub fn resolve_latest(src: &Source) -> (Option<Latest>, Option<Kind>) {
     match &src.origin {
-        Origin::Github { repo } => github_latest(src, repo).ok().flatten(),
-        Origin::Local { path } => local_latest(Path::new(path), src),
-        Origin::Url { url } => Some(Latest {
-            version: "latest".to_string(),
-            download_url: url.clone(),
-            size: None,
-            notes: None,
-        }),
+        Origin::Github { repo } => github_latest(src, repo).unwrap_or((None, None)),
+        Origin::Local { path } => (local_latest(Path::new(path), src), None),
+        Origin::Url { url } => (
+            Some(Latest {
+                version: "latest".to_string(),
+                download_url: url.clone(),
+                size: None,
+                notes: None,
+            }),
+            None,
+        ),
     }
 }
 
-fn github_latest(src: &Source, repo: &str) -> Result<Option<Latest>> {
+fn github_latest(src: &Source, repo: &str) -> Result<(Option<Latest>, Option<Kind>)> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let mut req = ureq::get(&url)
         .set("User-Agent", "LinuxAppManager")
@@ -41,7 +47,22 @@ fn github_latest(src: &Source, repo: &str) -> Result<Option<Latest>> {
     let notes = json["body"].as_str().map(|s| s.to_string());
 
     let assets = json["assets"].as_array().cloned().unwrap_or_default();
-    let asset = pick_asset(&assets, src);
+    let mut asset = pick_asset(&assets, src);
+
+    // Self-heal: if the stored kind matches no asset but the release *does* carry
+    // an installable one (the author changed the release format), re-detect from
+    // the assets already in hand — no extra request — and re-pick with it.
+    let mut corrected = None;
+    if asset.is_none() {
+        if let Some(k) = detect_kind(&assets, src.package_name()) {
+            if k != src.kind {
+                let healed = Source { kind: k, ..src.clone() };
+                asset = pick_asset(&assets, &healed);
+                corrected = Some(k);
+            }
+        }
+    }
+    let effective_kind = corrected.unwrap_or(src.kind);
 
     // Use the asset *API* URL (api.github.com/.../releases/assets/{id}). It works
     // anonymously for public repos (and with an optional env token). See
@@ -54,17 +75,20 @@ fn github_latest(src: &Source, repo: &str) -> Result<Option<Latest>> {
         None => (String::new(), None),
     };
 
-    // deb/appimage need a matching artifact to mean anything; a `bin` app can
+    // deb/appimage/tar need a matching artifact to mean anything; a `bin` app can
     // still report its latest tag (source-only release) with no download.
-    if asset.is_none() && src.kind != Kind::Bin {
-        return Ok(None);
+    if asset.is_none() && effective_kind != Kind::Bin {
+        return Ok((None, corrected));
     }
-    Ok(Some(Latest {
-        version,
-        download_url,
-        size,
-        notes,
-    }))
+    Ok((
+        Some(Latest {
+            version,
+            download_url,
+            size,
+            notes,
+        }),
+        corrected,
+    ))
 }
 
 /// Parse a config document into sources. Accepts either a bare array (the live
@@ -320,8 +344,8 @@ fn gh_repo_pages(base: &str) -> Vec<serde_json::Value> {
     out
 }
 
-/// The installable kind for a repo's latest release, if any (arch-strict).
-/// Preference: a bare binary named like the repo, then AppImage, then deb.
+/// The installable kind for a repo's latest release, if any. Fetches the
+/// release, then delegates to `detect_kind` on its assets.
 fn detect_installable(repo: &str, exec: &str) -> Option<Kind> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let mut req = ureq::get(&url)
@@ -332,7 +356,14 @@ fn detect_installable(repo: &str, exec: &str) -> Option<Kind> {
     }
     let json: serde_json::Value = req.call().ok()?.into_json().ok()?;
     let assets = json["assets"].as_array()?;
+    detect_kind(assets, exec)
+}
 
+/// The installable kind implied by a set of release assets, if any (arch-strict).
+/// Preference: a bare binary named like the repo, then AppImage, deb, tarball,
+/// then any extension-less binary. Operates on already-fetched assets, so
+/// callers that already hold the release JSON incur no extra request.
+pub fn detect_kind(assets: &[serde_json::Value], exec: &str) -> Option<Kind> {
     let bin_exact: Vec<&serde_json::Value> =
         assets.iter().filter(|a| a["name"].as_str() == Some(exec)).collect();
     if best_by_arch_strict(&bin_exact).is_some() {
