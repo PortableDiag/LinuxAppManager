@@ -174,13 +174,13 @@ pub fn export_config(srcs: &[Source], dest: &Path) -> Result<()> {
 }
 
 /// The manager ships in its own list, exactly like the Android App Manager.
-/// It installs as a single binary in ~/.local/bin, so its own kind is `bin`.
+/// Releases ship an AppImage; self-updates refresh the installed bundle.
 const DEFAULT_SOURCES: &str = r#"[
   {
     "id": "com.procomputation.LinuxAppManager",
     "name": "App Manager",
     "description": "This app. Manages itself.",
-    "kind": "bin",
+    "kind": "appimage",
     "package": "linux-app-manager",
     "auto_update": true,
     "origin": { "type": "github", "repo": "PortableDiag/LinuxAppManager" }

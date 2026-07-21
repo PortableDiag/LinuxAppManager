@@ -6,7 +6,7 @@
       "id": "com.procomputation.LinuxAppManager",
       "name": "App Manager",
       "description": "This app. Manages itself.",
-      "kind": "bin",
+      "kind": "appimage",
       "package": "linux-app-manager",
       "auto_update": true,
       "origin": { "type": "github", "repo": "PortableDiag/LinuxAppManager" }
@@ -14,10 +14,27 @@
     {
       "id": "com.procomputation.Gapless",
       "name": "Gapless",
-      "description": "Gapless music player (Rust/GStreamer/GTK4).",
-      "kind": "bin",
+      "description": "Gapless music player (Rust/GStreamer/GTK4). Self-contained AppImage.",
+      "kind": "appimage",
       "package": "gapless",
       "origin": { "type": "github", "repo": "PortableDiag/gapless" }
+    },
+    {
+      "id": "com.procomputation.Riptide",
+      "name": "Riptide",
+      "description": "Fast parallel download manager for the terminal. Run 'riptide' in a shell after installing.",
+      "kind": "bin",
+      "package": "riptide",
+      "cli": true,
+      "origin": { "type": "github", "repo": "PortableDiag/riptide" }
+    },
+    {
+      "id": "com.procomputation.ImgView",
+      "name": "ImgView",
+      "description": "Lightweight Picasa-style image viewer.",
+      "kind": "bin",
+      "package": "imgview",
+      "origin": { "type": "github", "repo": "PortableDiag/ImgView" }
     }
   ]
 }
