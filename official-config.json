@@ -22,10 +22,9 @@
     {
       "id": "com.procomputation.Riptide",
       "name": "Riptide",
-      "description": "Fast parallel download manager for the terminal. Run 'riptide' in a shell after installing.",
-      "kind": "bin",
+      "description": "Fast parallel download manager (GTK desktop app; also a CLI). Self-contained AppImage.",
+      "kind": "appimage",
       "package": "riptide",
-      "cli": true,
       "origin": { "type": "github", "repo": "PortableDiag/riptide" }
     },
     {
