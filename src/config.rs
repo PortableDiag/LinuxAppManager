@@ -39,6 +39,16 @@ pub fn self_bundle_dir() -> PathBuf {
         .join("app")
 }
 
+/// ~/.local/share/linux-app-manager/apps/<id> — installed AppImages, unpacked.
+/// Launching an installed app execs its AppRun directly, so it can't break on
+/// a machine where FUSE or the AppImage runtime misbehaves.
+pub fn apps_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("linux-app-manager")
+        .join("apps")
+}
+
 /// ~/.local/bin — where single-executable (`bin`) apps live.
 pub fn localbin_dir() -> PathBuf {
     dirs::home_dir()
@@ -119,13 +129,25 @@ pub fn save_sources(srcs: &[Source]) -> Result<()> {
     Ok(())
 }
 
-/// Merge incoming sources into existing, matching on `id` (incoming wins).
-/// Returns the merged list plus (added, updated) counts.
+/// Merge incoming sources into existing, matching on `id`, or failing that on
+/// the same GitHub repo (incoming wins). The repo match keeps an official-list
+/// entry from duplicating an auto-discovered one — discovery names sources
+/// after the bare repo ("gapless") while the curated list uses reverse-DNS ids.
 pub fn merge(existing: &[Source], incoming: Vec<Source>) -> (Vec<Source>, usize, usize) {
+    fn repo(s: &Source) -> Option<String> {
+        match &s.origin {
+            crate::model::Origin::Github { repo } => Some(repo.to_lowercase()),
+            _ => None,
+        }
+    }
     let mut out = existing.to_vec();
     let (mut added, mut updated) = (0, 0);
     for s in incoming {
-        match out.iter().position(|e| e.id == s.id) {
+        let pos = out
+            .iter()
+            .position(|e| e.id == s.id)
+            .or_else(|| out.iter().position(|e| repo(e).is_some() && repo(e) == repo(&s)));
+        match pos {
             Some(pos) => {
                 out[pos] = s;
                 updated += 1;

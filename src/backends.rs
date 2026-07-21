@@ -192,6 +192,7 @@ pub fn detect_installed(src: &Source) -> Option<String> {
 
     // 3. A managed binary/AppImage we (or the user) put in the usual spots.
     if config::localbin_dir().join(src.package_name()).exists()
+        || config::apps_dir().join(&src.id).join("AppRun").exists()
         || config::appimage_dir()
             .join(format!("{}.AppImage", src.id))
             .exists()
@@ -266,15 +267,19 @@ pub fn remove(src: &Source) -> Result<()> {
     match src.kind {
         Kind::Deb => run_pkexec(&["apt-get", "remove", "-y", src.package_name()]),
         Kind::AppImage => {
+            let _ = std::fs::remove_dir_all(config::apps_dir().join(&src.id));
             let _ = std::fs::remove_file(appimage_path(src));
             let _ = std::fs::remove_file(version_sidecar(src));
             let _ = std::fs::remove_file(desktop_path(src));
+            refresh_menu_caches();
             Ok(())
         }
         // Tar apps land as a single binary in ~/.local/bin, same as Bin.
         Kind::Bin | Kind::Tar => {
             let _ = std::fs::remove_file(bin_path(src));
             let _ = std::fs::remove_file(bin_sidecar(src));
+            let _ = std::fs::remove_file(desktop_path(src));
+            refresh_menu_caches();
             Ok(())
         }
     }
@@ -284,17 +289,11 @@ pub fn remove(src: &Source) -> Result<()> {
 pub fn open(src: &Source) -> Result<()> {
     match src.kind {
         Kind::AppImage => {
-            Command::new(appimage_path(src))
-                .spawn()
-                .context("launching AppImage")?;
-            Ok(())
+            let unpacked = config::apps_dir().join(&src.id).join("AppRun");
+            let target = if unpacked.exists() { unpacked } else { appimage_path(src) };
+            spawn_app(&target)
         }
-        Kind::Bin | Kind::Tar => {
-            Command::new(bin_path(src))
-                .spawn()
-                .context("launching binary")?;
-            Ok(())
-        }
+        Kind::Bin | Kind::Tar => spawn_app(&bin_path(src)),
         Kind::Deb => {
             // Try the package-named .desktop id; harmless if it doesn't match.
             Command::new("gtk-launch")
@@ -304,6 +303,19 @@ pub fn open(src: &Source) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Spawn a child app with the AppImage runtime variables scrubbed: when the
+/// manager itself runs from an AppImage, an inherited $APPDIR would make the
+/// child's own AppRun resolve against OUR tree instead of its own.
+fn spawn_app(cmd: &Path) -> Result<()> {
+    Command::new(cmd)
+        .env_remove("APPDIR")
+        .env_remove("APPIMAGE")
+        .env_remove("ARGV0")
+        .spawn()
+        .with_context(|| format!("launching {}", cmd.display()))?;
+    Ok(())
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -372,24 +384,85 @@ fn install_appimage(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()>
     if src.id == SELF_ID {
         return update_self_bundle(latest, file);
     }
-    let dir = config::appimage_dir();
-    std::fs::create_dir_all(&dir)?;
-    let dest = appimage_path(src);
-    // Move into place (copy across filesystems, then drop the temp).
-    if file != &dest {
-        std::fs::copy(file, &dest)?;
-        if file.starts_with(config::cache_dir()) {
-            let _ = std::fs::remove_file(file);
+    // A custom install_path means the user wants the .AppImage file itself at
+    // that spot — honor it verbatim.
+    if src.install_path.as_deref().map(str::trim).is_some_and(|p| !p.is_empty()) {
+        let dest = appimage_path(src);
+        if file != &dest {
+            std::fs::copy(file, &dest)?;
+            if file.starts_with(config::cache_dir()) {
+                let _ = std::fs::remove_file(file);
+            }
         }
+        let mut perms = std::fs::metadata(&dest)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest, perms)?;
+        write_desktop(src, &dest, None)?;
+        std::fs::write(version_sidecar(src), &latest.version)?;
+        refresh_menu_caches();
+        return Ok(());
     }
-    let mut perms = std::fs::metadata(&dest)?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&dest, perms)?;
 
-    write_desktop(src, &dest)?;
+    // Default: unpack the AppImage instead of keeping the file. Launching the
+    // installed app is then a plain exec of its AppRun — no FUSE, no embedded
+    // runtime involved on the target machine.
+    let mut perms = std::fs::metadata(file)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(file, perms)?;
+    std::fs::create_dir_all(config::apps_dir())?;
+    let workdir = config::apps_dir().join(format!(".{}.extract", src.id));
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir)?;
+    // --appimage-extract is handled by the AppImage's embedded runtime and
+    // works without FUSE; it unpacks to ./squashfs-root.
+    let status = Command::new(file)
+        .arg("--appimage-extract")
+        .current_dir(&workdir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("unpacking the AppImage")?;
+    let tree = workdir.join("squashfs-root");
+    if !status.success() || !tree.join("AppRun").exists() {
+        let _ = std::fs::remove_dir_all(&workdir);
+        return Err(anyhow!("could not unpack {}", file.display()));
+    }
+    let dest = config::apps_dir().join(&src.id);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::rename(&tree, &dest)?;
+    let _ = std::fs::remove_dir_all(&workdir);
+    if file.starts_with(config::cache_dir()) {
+        let _ = std::fs::remove_file(file);
+    }
+    // Retire a pre-0.1.11 file-form install from the default spot.
+    let _ = std::fs::remove_file(config::appimage_dir().join(format!("{}.AppImage", src.id)));
+
+    write_desktop(src, &dest.join("AppRun"), tree_icon(&dest).as_deref())?;
     std::fs::write(version_sidecar(src), &latest.version)?;
     refresh_menu_caches();
     Ok(())
+}
+
+/// An icon file shipped at the root of an extracted AppImage tree (prefer a
+/// real *.svg/*.png over the extensionless .DirIcon), referenced by absolute
+/// path from the menu entry.
+fn tree_icon(dir: &Path) -> Option<PathBuf> {
+    let mut png = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        match p.extension().and_then(|x| x.to_str()) {
+            Some("svg") => return Some(p),
+            Some("png") => png = Some(p),
+            _ => {}
+        }
+    }
+    png.or_else(|| {
+        let d = dir.join(".DirIcon");
+        d.is_file().then_some(d)
+    })
 }
 
 /// Self-update from a downloaded release AppImage: unpack it (the embedded
@@ -455,6 +528,17 @@ fn install_bin(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
         let _ = std::fs::remove_file(file);
     }
     record_bin_version(src, &latest.version)?;
+    finish_bin_install(src, &dest)?;
+    Ok(())
+}
+
+/// GUI binaries get a menu entry (absolute Exec — ~/.local/bin may not be on
+/// the launcher's $PATH); terminal tools (`cli: true`) stay out of the menu.
+fn finish_bin_install(src: &Source, dest: &Path) -> Result<()> {
+    if !src.cli {
+        write_desktop(src, dest, None)?;
+        refresh_menu_caches();
+    }
     Ok(())
 }
 
@@ -511,6 +595,7 @@ fn install_tar(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
         let _ = std::fs::remove_file(file);
     }
     record_bin_version(src, &latest.version)?;
+    finish_bin_install(src, &dest)?;
     Ok(())
 }
 
@@ -566,7 +651,7 @@ pub fn record_bin_version(src: &Source, version: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_desktop(src: &Source, exec: &PathBuf) -> Result<()> {
+fn write_desktop(src: &Source, exec: &Path, icon: Option<&Path>) -> Result<()> {
     let dir = config::desktop_dir();
     std::fs::create_dir_all(&dir)?;
     let mut f = std::fs::File::create(desktop_path(src))?;
@@ -576,12 +661,14 @@ fn write_desktop(src: &Source, exec: &PathBuf) -> Result<()> {
          Type=Application\n\
          Name={name}\n\
          Exec={exec}\n\
-         Icon={id}\n\
+         Icon={icon}\n\
          Terminal=false\n\
          Categories=Utility;\n",
         name = src.name,
         exec = exec.display(),
-        id = src.id,
+        icon = icon
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| src.id.clone()),
     )?;
     Ok(())
 }

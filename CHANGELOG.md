@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.11 — 2026-07-20
+
+- **Every installed app now shows up in the app menu.** `bin` and `tar`
+  installs write a menu entry with an absolute Exec path (previously they
+  landed silently in `~/.local/bin` — "installed" with nothing to click).
+- **AppImages are unpacked on install** (to
+  `~/.local/share/linux-app-manager/apps/<id>`) and the menu entry runs their
+  AppRun directly — launching an installed app no longer involves FUSE or the
+  AppImage runtime. The app's own icon is picked up from the unpacked tree. A
+  custom `install_path` still keeps the plain `.AppImage` file at that path.
+- **New `cli` source flag** for terminal tools (e.g. riptide): no bogus menu
+  entry, no Open button; the UI and install toast say to run it from a shell
+  instead.
+- **Official-list import no longer duplicates discovered apps** — merging
+  matches on the GitHub repo as well as the id, so a curated entry replaces
+  the auto-discovered entry for the same repo.
+- Child apps are launched with `$APPDIR`/`$APPIMAGE` scrubbed so another
+  app's AppRun can't resolve against App Manager's own tree.
+
 ## 0.1.10 — 2026-07-20
 
 - **Self-install now unpacks the AppImage into a plain-files bundle**

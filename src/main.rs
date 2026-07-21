@@ -480,7 +480,7 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
             btn.set_valign(gtk::Align::Center);
             row.add_suffix(&btn);
         }
-    } else if let Some((label, action, suggested)) = normal_primary(status) {
+    } else if let Some((label, action, suggested)) = normal_primary(status, entry.source.cli) {
         let btn = gtk::Button::with_label(label);
         btn.set_valign(gtk::Align::Center);
         if suggested {
@@ -498,11 +498,13 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
     row
 }
 
-/// Install/Update/Open label for a normal (non-self) app.
-fn normal_primary(status: Status) -> Option<(&'static str, Action, bool)> {
+/// Install/Update/Open label for a normal (non-self) app. Terminal apps get no
+/// Open button — there is no window to open; they're run from a shell.
+fn normal_primary(status: Status, cli: bool) -> Option<(&'static str, Action, bool)> {
     match status {
         Status::NotInstalled => Some(("Install", Action::Install, true)),
         Status::UpdateAvailable => Some(("Update", Action::Update, true)),
+        Status::UpToDate | Status::Unknown if cli => None,
         Status::UpToDate | Status::Unknown => Some(("Open", Action::Open, false)),
     }
 }
@@ -617,6 +619,12 @@ fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
         }
     }
     add_row("Kind", kind_text(src.kind));
+    if src.cli {
+        add_row(
+            "Run from terminal",
+            &format!("{}  (~/.local/bin must be on your PATH)", src.package_name()),
+        );
+    }
     add_row("Source", &origin_text(&src.origin));
     if let Some(p) = src.install_path.as_deref().filter(|p| !p.trim().is_empty()) {
         add_row("Path", p);
@@ -658,7 +666,7 @@ fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
         if let Some(btn) = self_action_button(ui, &entry, status) {
             bx.append(&btn);
         }
-    } else if let Some((label, action, suggested)) = normal_primary(status) {
+    } else if let Some((label, action, suggested)) = normal_primary(status, entry.source.cli) {
         let btn = gtk::Button::with_label(label);
         if suggested {
             btn.add_css_class("suggested-action");
@@ -761,7 +769,7 @@ fn status_text(s: Status) -> &'static str {
 fn kind_text(k: Kind) -> &'static str {
     match k {
         Kind::Bin => "Executable (~/.local/bin)",
-        Kind::AppImage => "AppImage (~/Applications)",
+        Kind::AppImage => "AppImage (unpacked into the app menu)",
         Kind::Deb => "Debian package (apt)",
         Kind::Tar => "Tarball (~/.local/bin)",
     }
@@ -811,6 +819,11 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
         return;
     }
 
+    // A terminal app has nothing to click afterwards — tell the user how to
+    // run it once the install lands.
+    let cli_hint = (entry.source.cli && matches!(action, Action::Install | Action::Update))
+        .then(|| entry.source.package_name().to_string());
+
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
         let res = match action {
@@ -825,8 +838,14 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
     });
 
     glib::spawn_future_local(async move {
-        if let Ok(Err(e)) = rx.recv().await {
-            toast(&ui, &format!("Failed: {e}"));
+        match rx.recv().await {
+            Ok(Err(e)) => toast(&ui, &format!("Failed: {e}")),
+            Ok(Ok(())) => {
+                if let Some(pkg) = cli_hint {
+                    toast(&ui, &format!("Installed — terminal app: run '{pkg}' in a shell"));
+                }
+            }
+            Err(_) => {}
         }
         refresh(ui);
     });
@@ -1001,6 +1020,7 @@ fn source_dialog(ui: &Rc<Ui>, existing: Option<Source>) {
             install_path: (!path.is_empty()).then_some(path),
             origin: Origin::Github { repo },
             auto_update: existing.as_ref().map(|e| e.auto_update).unwrap_or(false),
+            cli: false,
         };
         // If editing changed the id, drop the old entry so we don't dup it.
         if let Some(old) = &existing {

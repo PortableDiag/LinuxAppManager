@@ -71,6 +71,10 @@ pub struct Source {
     /// Off by default; the manager enables it for itself.
     #[serde(default)]
     pub auto_update: bool,
+    /// A terminal program: no menu entry is created and the UI says to run it
+    /// from a shell instead of offering to open it.
+    #[serde(default)]
+    pub cli: bool,
 }
 
 impl Source {

@@ -299,6 +299,7 @@ pub fn follow_user(user: &str) -> Result<Vec<Source>> {
                         install_path: None,
                         origin: Origin::Github { repo: full.clone() },
                         auto_update: false,
+                        cli: false,
                     });
                 }
             });
@@ -414,6 +415,7 @@ pub fn resolve_repo(input: &str) -> Result<Source> {
         install_path: None,
         origin: Origin::Github { repo },
         auto_update: false,
+        cli: false,
     })
 }
 
