@@ -117,8 +117,13 @@ fn install_bundle_tree(tree: &Path) -> Result<()> {
     std::fs::set_permissions(&staged_w, perms)?;
     std::fs::rename(&staged_w, &wrapper)?;
 
-    // Retire the v0.1.9-era whole-AppImage copy, superseded by the bundle.
+    // Retire the v0.1.9-era whole-AppImage copy AND its version sidecar,
+    // superseded by the bundle. The stale sidecar matters: self is `appimage`
+    // kind, so detection reads the appimage sidecar first — a leftover here
+    // would shadow the real version recorded in versions/ and make App Manager
+    // perpetually show an update for a version it's already running.
     let _ = std::fs::remove_file(config::appimage_dir().join(format!("{SELF_ID}.AppImage")));
+    let _ = std::fs::remove_file(config::appimage_dir().join(format!("{SELF_ID}.version")));
     Ok(())
 }
 
@@ -221,9 +226,17 @@ fn dpkg_version(pkg: &str) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
-/// Recorded version from either sidecar, else the "unknown" sentinel.
+/// Recorded version from a sidecar, else the "unknown" sentinel. The sidecar
+/// matching the source's *current* kind is read first: an app that migrated
+/// from `bin` to `appimage` (or back) leaves the old kind's sidecar on disk,
+/// and reading that first would keep reporting the stale pre-migration version
+/// — so the Update button would never clear even after a successful update.
 fn sidecar_or_unknown(src: &Source) -> String {
-    for p in [bin_sidecar(src), version_sidecar(src)] {
+    let order = match src.kind {
+        Kind::AppImage => [version_sidecar(src), bin_sidecar(src)],
+        _ => [bin_sidecar(src), version_sidecar(src)],
+    };
+    for p in order {
         if let Ok(s) = std::fs::read_to_string(&p) {
             let s = s.trim();
             if !s.is_empty() {
@@ -245,11 +258,48 @@ fn on_path(name: &str) -> bool {
 pub fn install(src: &Source, latest: &Latest) -> Result<()> {
     std::fs::create_dir_all(config::cache_dir())?;
     let file = download(src, latest)?;
-    match src.kind {
+    let result = match src.kind {
         Kind::Deb => install_deb(&file),
         Kind::AppImage => install_appimage(src, latest, &file),
         Kind::Bin => install_bin(src, latest, &file),
         Kind::Tar => install_tar(src, latest, &file),
+    };
+    if result.is_ok() {
+        cleanup_foreign_artifacts(src);
+    }
+    result
+}
+
+/// Remove artifacts left by a *previous* install of the same app under a
+/// different `kind` (e.g. gapless shipped as a bare `bin`, now an `appimage`).
+/// Without this, the orphaned binary/bundle and its stale version sidecar hang
+/// around — the old binary is often the broken one, and its sidecar can shadow
+/// the real installed version. Never touches App Manager itself, whose bin
+/// wrapper and appimage bundle are both legitimate parts of one install.
+fn cleanup_foreign_artifacts(src: &Source) {
+    if src.id == SELF_ID {
+        return;
+    }
+    match src.kind {
+        Kind::AppImage => {
+            // A leftover bin/tar install of the same app.
+            let has_custom_path = src
+                .install_path
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|p| !p.is_empty());
+            if !has_custom_path {
+                let _ = std::fs::remove_file(config::localbin_dir().join(src.package_name()));
+            }
+            let _ = std::fs::remove_file(bin_sidecar(src));
+        }
+        Kind::Bin | Kind::Tar => {
+            // A leftover appimage install of the same app.
+            let _ = std::fs::remove_dir_all(config::apps_dir().join(&src.id));
+            let _ = std::fs::remove_file(config::appimage_dir().join(format!("{}.AppImage", src.id)));
+            let _ = std::fs::remove_file(version_sidecar(src));
+        }
+        Kind::Deb => {}
     }
 }
 

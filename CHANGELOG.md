@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.13 — 2026-07-20
+
+- **Fix: updates that never cleared.** An app that changed packaging between
+  releases (e.g. Gapless going from a bare `bin` to an `appimage`) kept showing
+  "update available" even right after a successful update. Detection read the
+  *old* kind's version sidecar first, reporting the stale pre-migration version
+  forever. It now reads the sidecar matching the app's current kind first, and
+  every install removes the previous kind's leftovers (orphaned binary/bundle
+  and its stale sidecar) — which also clears out the old, often-broken bare
+  binary that lingered in `~/.local/bin`.
+
 ## 0.1.12 — 2026-07-20
 
 - **`--install <id>` CLI command** — install or update one app by id or name

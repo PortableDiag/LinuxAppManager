@@ -1,6 +1,6 @@
 [package]
 name = "linux-app-manager"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 description = "A private sideload/catalog manager for your own Linux apps"
 license = "MIT"
