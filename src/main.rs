@@ -197,7 +197,7 @@ fn print_usage() {
          linux-app-manager                 launch the GUI\n  \
          linux-app-manager --list          print the catalog (installed vs latest)\n  \
          linux-app-manager --add <repo>    add one GitHub repo/URL (auto-detected)\n  \
-         linux-app-manager --install-self  install THIS copy (AppImage→~/Applications, binary→~/.local/bin)\n  \
+         linux-app-manager --install-self  install THIS copy for this user (+icon, menu entry)\n  \
          linux-app-manager --auto-update   install pending updates for auto-update apps\n  \
          linux-app-manager --follow-user <u>   follow a GitHub user's installable repos\n  \
          linux-app-manager --discover      re-scan followed users for new repos\n  \
@@ -516,7 +516,7 @@ fn self_action_button(ui: &Rc<Ui>, entry: &Entry, status: Status) -> Option<gtk:
         let btn = gtk::Button::with_label(label);
         btn.add_css_class("suggested-action");
         let tip = if backends::running_appimage().is_some() {
-            "Install this AppImage to ~/Applications"
+            "Install to your app menu (all libraries included)"
         } else {
             "Install this running copy to ~/.local/bin"
         };
@@ -543,10 +543,18 @@ fn self_action_button(ui: &Rc<Ui>, entry: &Entry, status: Status) -> Option<gtk:
 }
 
 /// Label for the self-install button, or None when we're already running the
-/// installed copy (~/Applications AppImage or ~/.local/bin binary).
+/// installed copy (the extracted bundle, or the ~/.local/bin binary).
 fn self_install_label() -> Option<&'static str> {
-    let installed = backends::self_install_dest();
-    let running = backends::running_appimage().or_else(|| std::env::current_exe().ok())?;
+    let installed = config::localbin_dir().join("linux-app-manager");
+    if backends::running_appimage().is_some() {
+        // Running straight off the .AppImage file (USB / download) — always
+        // offer to install/refresh the on-disk bundle.
+        return Some(if installed.exists() { "Reinstall this copy" } else { "Install" });
+    }
+    let running = std::env::current_exe().ok()?;
+    if running.starts_with(config::self_bundle_dir()) {
+        return None; // we ARE the installed bundle
+    }
     let running_c = std::fs::canonicalize(&running).ok();
     let installed_c = std::fs::canonicalize(&installed).ok();
     if running_c.is_some() && running_c == installed_c {

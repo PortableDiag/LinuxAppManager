@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.10 — 2026-07-20
+
+- **Self-install now unpacks the AppImage into a plain-files bundle**
+  (`~/.local/share/linux-app-manager/app`) with a small launcher at
+  `~/.local/bin/linux-app-manager`. Launching the installed app is a plain
+  exec — it no longer depends on FUSE or the AppImage runtime working on the
+  target machine, which could leave the 0.1.9-style installed AppImage
+  unlaunchable from the menu on some setups. Self-updates refresh the same
+  bundle, and a bare-binary release can never overwrite the launcher and
+  strand the app without its libraries again.
+- **Menu caches refreshed after installs** — `update-desktop-database`,
+  KDE's `kbuildsycoca`, and the icon cache are nudged after (self-)installs,
+  so the menu entry stops pointing at a stale location (KDE could otherwise
+  keep launching an old Exec line long after the .desktop file changed —
+  "Could not find the program …").
+
 ## 0.1.9 — 2026-07-20
 
 - **Fix: self-install from the AppImage no longer breaks** — clicking Install

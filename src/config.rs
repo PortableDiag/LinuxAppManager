@@ -29,6 +29,16 @@ pub fn appimage_dir() -> PathBuf {
         .join("Applications")
 }
 
+/// ~/.local/share/linux-app-manager/app — the extracted self-contained bundle
+/// (AppRun + all shared libraries) that self-install unpacks the AppImage
+/// into. Launching it is a plain exec — no AppImage runtime, no FUSE.
+pub fn self_bundle_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("linux-app-manager")
+        .join("app")
+}
+
 /// ~/.local/bin — where single-executable (`bin`) apps live.
 pub fn localbin_dir() -> PathBuf {
     dirs::home_dir()

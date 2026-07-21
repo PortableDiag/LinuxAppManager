@@ -27,55 +27,146 @@ pub fn running_appimage() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// Where install_self() puts us, given how we are running right now:
-/// the whole AppImage into ~/Applications, or a loose binary into ~/.local/bin.
-pub fn self_install_dest() -> PathBuf {
-    match running_appimage() {
-        Some(_) => config::appimage_dir().join(format!("{SELF_ID}.AppImage")),
-        None => config::localbin_dir().join("linux-app-manager"),
-    }
+/// $APPDIR — the AppImage's unpacked content tree (squashfs mount or the
+/// extract-and-run temp dir). Only trusted while $APPIMAGE is also set.
+fn running_appdir() -> Option<PathBuf> {
+    running_appimage()?;
+    let d = PathBuf::from(std::env::var_os("APPDIR")?);
+    d.join("AppRun").is_file().then_some(d)
 }
 
 /// Install the *currently running* App Manager, plus its icon and .desktop
-/// entry. Works offline / from a USB. Atomic rename, so it's safe even over
-/// the running install.
+/// entry. Works offline / from a USB.
 ///
-/// When launched from an AppImage ($APPIMAGE set), the whole .AppImage file is
-/// installed — current_exe() points at the bare binary inside the temporary
-/// squashfs mount, and its bundled GTK/libadwaita libraries vanish with the
-/// mount, so a copy of that binary alone dies with "cannot open shared object
-/// file" on any machine missing those libs (the exact problem the AppImage
-/// exists to solve). Otherwise the loose binary is copied to ~/.local/bin.
+/// When launched from an AppImage, the whole content tree ($APPDIR) is copied
+/// to ~/.local/share/linux-app-manager/app and a tiny launcher script is
+/// written to ~/.local/bin/linux-app-manager. The installed copy is then plain
+/// files — starting it needs neither FUSE nor the AppImage runtime, and every
+/// bundled GTK/libadwaita library is on disk next to it. (Copying just
+/// current_exe() would strand the binary without those libs — they vanish with
+/// the AppImage mount — and copying the .AppImage file kept launch dependent
+/// on the runtime working on the target machine.)
+///
+/// When running as a loose binary, it is copied to ~/.local/bin as before.
 pub fn install_self() -> Result<PathBuf> {
-    let source = match running_appimage() {
-        Some(appimage) => appimage,
-        None => std::env::current_exe().context("locating the running binary")?,
-    };
-    let dest = self_install_dest();
-    let dir = dest.parent().ok_or_else(|| anyhow!("bad install dir"))?;
-    std::fs::create_dir_all(dir)?;
-    let name = dest.file_name().unwrap_or_default().to_string_lossy();
-    let staged = dir.join(format!(".{name}.new"));
-    std::fs::copy(&source, &staged).context("copying into place")?;
-    let mut perms = std::fs::metadata(&staged)?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&staged, perms)?;
-    std::fs::rename(&staged, &dest)?;
+    let bundle = config::self_bundle_dir();
+    let wrapper = config::localbin_dir().join("linux-app-manager");
 
+    if let Some(appdir) = running_appdir() {
+        install_bundle_tree(&appdir)?;
+    } else {
+        let exe = std::env::current_exe().context("locating the running binary")?;
+        if !exe.starts_with(&bundle) {
+            // Loose binary → ~/.local/bin, atomic over any previous install.
+            std::fs::create_dir_all(config::localbin_dir())?;
+            let staged = config::localbin_dir().join(".linux-app-manager.new");
+            std::fs::copy(&exe, &staged).context("copying binary")?;
+            let mut perms = std::fs::metadata(&staged)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&staged, perms)?;
+            std::fs::rename(&staged, &wrapper)?;
+        }
+        // else: we ARE the installed bundle — nothing to copy, just refresh
+        // the icon/menu entry below.
+    }
+
+    finish_self_install(env!("CARGO_PKG_VERSION"))?;
+    Ok(wrapper)
+}
+
+/// Copy an unpacked AppImage tree (must contain AppRun) into the bundle dir,
+/// staged + rename so a half-finished copy is never live, then point the
+/// ~/.local/bin launcher at it.
+fn install_bundle_tree(tree: &Path) -> Result<()> {
+    let bundle = config::self_bundle_dir();
+    let parent = bundle.parent().ok_or_else(|| anyhow!("bad bundle dir"))?;
+    std::fs::create_dir_all(parent)?;
+    let staged = parent.join(".app.new");
+    let _ = std::fs::remove_dir_all(&staged);
+    std::fs::create_dir_all(&staged)?;
+    // cp -a keeps the symlinks and exec bits a .so tree needs; std has no
+    // recursive copy.
+    let status = Command::new("cp")
+        .arg("-a")
+        .arg(format!("{}/.", tree.display()))
+        .arg(&staged)
+        .status()
+        .context("running cp")?;
+    if !status.success() {
+        return Err(anyhow!("copying the app bundle failed"));
+    }
+    // The running copy keeps its already-mapped files even as the old dir goes.
+    let _ = std::fs::remove_dir_all(&bundle);
+    std::fs::rename(&staged, &bundle)?;
+
+    // Launcher script: menu entry and $PATH both go through it. Clear the
+    // AppImage variables so a copy started from inside the running AppImage
+    // can't inherit a stale mount path.
+    let wrapper = config::localbin_dir().join("linux-app-manager");
+    std::fs::create_dir_all(config::localbin_dir())?;
+    let staged_w = config::localbin_dir().join(".linux-app-manager.new");
+    std::fs::write(
+        &staged_w,
+        format!(
+            "#!/bin/sh\nunset APPDIR APPIMAGE ARGV0\nexec \"{}/AppRun\" \"$@\"\n",
+            bundle.display()
+        ),
+    )?;
+    let mut perms = std::fs::metadata(&staged_w)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&staged_w, perms)?;
+    std::fs::rename(&staged_w, &wrapper)?;
+
+    // Retire the v0.1.9-era whole-AppImage copy, superseded by the bundle.
+    let _ = std::fs::remove_file(config::appimage_dir().join(format!("{SELF_ID}.AppImage")));
+    Ok(())
+}
+
+/// Icon, menu entry (absolute Exec — ~/.local/bin isn't on every launcher's
+/// $PATH), recorded version, and a desktop-cache nudge.
+fn finish_self_install(version: &str) -> Result<()> {
     let icon_dir = config::data_dir_icons();
     std::fs::create_dir_all(&icon_dir)?;
     std::fs::write(icon_dir.join(format!("{SELF_ID}.svg")), SELF_ICON)?;
     let app_dir = config::desktop_dir();
     std::fs::create_dir_all(&app_dir)?;
-    // Exec must be the absolute install path: an AppImage is never on $PATH,
-    // and ~/.local/bin isn't on the menu launcher's $PATH on every distro.
+    let exec = config::localbin_dir().join("linux-app-manager");
     let desktop =
-        SELF_DESKTOP.replace("Exec=linux-app-manager", &format!("Exec={}", dest.display()));
+        SELF_DESKTOP.replace("Exec=linux-app-manager", &format!("Exec={}", exec.display()));
     std::fs::write(app_dir.join(format!("{SELF_ID}.desktop")), desktop)?;
 
     std::fs::create_dir_all(config::versions_dir())?;
-    std::fs::write(config::versions_dir().join(SELF_ID), env!("CARGO_PKG_VERSION"))?;
-    Ok(dest)
+    std::fs::write(config::versions_dir().join(SELF_ID), version)?;
+    refresh_menu_caches();
+    Ok(())
+}
+
+/// Nudge the desktop environment to re-read menu entries. KDE in particular
+/// caches .desktop files (sycoca) and can keep launching a stale Exec line
+/// long after the file on disk changed. All best-effort.
+fn refresh_menu_caches() {
+    let apps = config::desktop_dir();
+    let icons = dirs::data_dir().map(|d| d.join("icons/hicolor"));
+    let mut cmds: Vec<Vec<String>> = vec![
+        vec!["update-desktop-database".into(), apps.display().to_string()],
+        vec!["kbuildsycoca6".into()],
+        vec!["kbuildsycoca5".into()],
+    ];
+    if let Some(icons) = icons {
+        cmds.push(vec![
+            "gtk-update-icon-cache".into(),
+            "-f".into(),
+            "-t".into(),
+            icons.display().to_string(),
+        ]);
+    }
+    for cmd in cmds {
+        let _ = Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 /// Installed version, or `None` if not present. Detection is method-agnostic:
@@ -163,6 +254,15 @@ pub fn install(src: &Source, latest: &Latest) -> Result<()> {
 
 /// Remove an installed app.
 pub fn remove(src: &Source) -> Result<()> {
+    if src.id == SELF_ID {
+        // Self lives as a bundle + launcher, whatever kind the list says.
+        let _ = std::fs::remove_dir_all(config::self_bundle_dir());
+        let _ = std::fs::remove_file(config::localbin_dir().join("linux-app-manager"));
+        let _ = std::fs::remove_file(config::appimage_dir().join(format!("{SELF_ID}.AppImage")));
+        let _ = std::fs::remove_file(config::desktop_dir().join(format!("{SELF_ID}.desktop")));
+        let _ = std::fs::remove_file(config::versions_dir().join(SELF_ID));
+        return Ok(());
+    }
     match src.kind {
         Kind::Deb => run_pkexec(&["apt-get", "remove", "-y", src.package_name()]),
         Kind::AppImage => {
@@ -266,6 +366,12 @@ fn install_deb(file: &PathBuf) -> Result<()> {
 }
 
 fn install_appimage(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
+    // App Manager itself installs as an extracted bundle (see install_self),
+    // so a self-update must refresh that bundle — dropping the new .AppImage
+    // in ~/Applications would fork the install in two places.
+    if src.id == SELF_ID {
+        return update_self_bundle(latest, file);
+    }
     let dir = config::appimage_dir();
     std::fs::create_dir_all(&dir)?;
     let dest = appimage_path(src);
@@ -282,10 +388,48 @@ fn install_appimage(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()>
 
     write_desktop(src, &dest)?;
     std::fs::write(version_sidecar(src), &latest.version)?;
+    refresh_menu_caches();
     Ok(())
 }
 
+/// Self-update from a downloaded release AppImage: unpack it (the embedded
+/// runtime's --appimage-extract needs no FUSE) and swap the installed bundle.
+/// The running copy keeps working off its old, already-mapped files until
+/// relaunch.
+fn update_self_bundle(latest: &Latest, file: &PathBuf) -> Result<()> {
+    let mut perms = std::fs::metadata(file)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(file, perms)?;
+    let workdir = config::cache_dir().join(".self-extract");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir)?;
+    let status = Command::new(file)
+        .arg("--appimage-extract")
+        .current_dir(&workdir)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .context("unpacking the update")?;
+    let tree = workdir.join("squashfs-root");
+    if !status.success() || !tree.join("AppRun").is_file() {
+        let _ = std::fs::remove_dir_all(&workdir);
+        return Err(anyhow!("could not unpack the downloaded update"));
+    }
+    let result = install_bundle_tree(&tree).and_then(|()| finish_self_install(&latest.version));
+    let _ = std::fs::remove_dir_all(&workdir);
+    if file.starts_with(config::cache_dir()) {
+        let _ = std::fs::remove_file(file);
+    }
+    result
+}
+
 fn install_bin(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
+    // A bare binary must never overwrite the self bundle's launcher — it would
+    // strand the app without its bundled libraries again.
+    if src.id == SELF_ID && config::self_bundle_dir().join("AppRun").is_file() {
+        return Err(anyhow!(
+            "App Manager is installed as a self-contained bundle — update it from an AppImage release"
+        ));
+    }
     if latest.download_url.is_empty() {
         return Err(anyhow!(
             "{} has no downloadable release asset — build it from source and copy \
