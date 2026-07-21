@@ -197,7 +197,7 @@ fn print_usage() {
          linux-app-manager                 launch the GUI\n  \
          linux-app-manager --list          print the catalog (installed vs latest)\n  \
          linux-app-manager --add <repo>    add one GitHub repo/URL (auto-detected)\n  \
-         linux-app-manager --install-self  install THIS binary to ~/.local/bin (+icon,menu)\n  \
+         linux-app-manager --install-self  install THIS copy (AppImage→~/Applications, binary→~/.local/bin)\n  \
          linux-app-manager --auto-update   install pending updates for auto-update apps\n  \
          linux-app-manager --follow-user <u>   follow a GitHub user's installable repos\n  \
          linux-app-manager --discover      re-scan followed users for new repos\n  \
@@ -507,14 +507,20 @@ fn normal_primary(status: Status) -> Option<(&'static str, Action, bool)> {
     }
 }
 
-/// The action button for App Manager's own entry: install THIS running copy to
-/// ~/.local/bin when we're a loose binary (USB / repo / download); otherwise a
-/// normal download-update if a newer release is out; else nothing.
+/// The action button for App Manager's own entry: install THIS running copy
+/// (whole AppImage → ~/Applications, loose binary → ~/.local/bin) when we're
+/// not already the installed one; otherwise a normal download-update if a
+/// newer release is out; else nothing.
 fn self_action_button(ui: &Rc<Ui>, entry: &Entry, status: Status) -> Option<gtk::Button> {
     if let Some(label) = self_install_label() {
         let btn = gtk::Button::with_label(label);
         btn.add_css_class("suggested-action");
-        btn.set_tooltip_text(Some("Install this running copy to ~/.local/bin"));
+        let tip = if backends::running_appimage().is_some() {
+            "Install this AppImage to ~/Applications"
+        } else {
+            "Install this running copy to ~/.local/bin"
+        };
+        btn.set_tooltip_text(Some(tip));
         let ui = ui.clone();
         btn.connect_clicked(move |b| {
             b.set_sensitive(false);
@@ -537,10 +543,10 @@ fn self_action_button(ui: &Rc<Ui>, entry: &Entry, status: Status) -> Option<gtk:
 }
 
 /// Label for the self-install button, or None when we're already running the
-/// installed copy at ~/.local/bin.
+/// installed copy (~/Applications AppImage or ~/.local/bin binary).
 fn self_install_label() -> Option<&'static str> {
-    let installed = dirs::home_dir()?.join(".local/bin/linux-app-manager");
-    let running = std::env::current_exe().ok()?;
+    let installed = backends::self_install_dest();
+    let running = backends::running_appimage().or_else(|| std::env::current_exe().ok())?;
     let running_c = std::fs::canonicalize(&running).ok();
     let installed_c = std::fs::canonicalize(&installed).ok();
     if running_c.is_some() && running_c == installed_c {
@@ -552,7 +558,7 @@ fn self_install_label() -> Option<&'static str> {
     }
 }
 
-/// Copy the running binary into ~/.local/bin (+ icon, menu entry), off-thread.
+/// Install the running copy (AppImage or loose binary) off-thread.
 fn do_self_install(ui: Rc<Ui>) {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.9 — 2026-07-20
+
+- **Fix: self-install from the AppImage no longer breaks** — clicking Install
+  (or `--install-self`) while running from the AppImage used to copy the *bare
+  binary* out of the temporary AppImage mount into `~/.local/bin`. That copy
+  left all the bundled GTK/libadwaita libraries behind, so the installed app
+  died with "cannot open shared object file" on machines without them — the
+  exact problem the AppImage exists to solve. It now installs the **whole
+  .AppImage** to `~/Applications` (the same place managed AppImages live) and
+  points the menu entry there.
+- **Fix: menu entry always launches** — the installed `.desktop` entry now uses
+  the absolute path of the installed copy; it used to rely on `~/.local/bin`
+  being on the launcher's `$PATH`, which not every distro guarantees.
+
 ## 0.1.8 — 2026-07-20
 
 - **Self-healing `kind`** — if an app's stored `kind` no longer matches its

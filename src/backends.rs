@@ -20,16 +20,43 @@ const SELF_ICON: &str = include_str!("../data/com.procomputation.LinuxAppManager
 const SELF_DESKTOP: &str = include_str!("../data/com.procomputation.LinuxAppManager.desktop");
 const SELF_ID: &str = "com.procomputation.LinuxAppManager";
 
-/// Install the *currently running* App Manager binary to ~/.local/bin, plus its
-/// icon and .desktop entry. Copies this executable (works offline / from a USB),
-/// not a download. Atomic rename, so it's safe even over the running install.
+/// The AppImage file we are currently running from, if any. The AppImage
+/// runtime exports $APPIMAGE = absolute path of the .AppImage file.
+pub fn running_appimage() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var_os("APPIMAGE")?);
+    p.is_file().then_some(p)
+}
+
+/// Where install_self() puts us, given how we are running right now:
+/// the whole AppImage into ~/Applications, or a loose binary into ~/.local/bin.
+pub fn self_install_dest() -> PathBuf {
+    match running_appimage() {
+        Some(_) => config::appimage_dir().join(format!("{SELF_ID}.AppImage")),
+        None => config::localbin_dir().join("linux-app-manager"),
+    }
+}
+
+/// Install the *currently running* App Manager, plus its icon and .desktop
+/// entry. Works offline / from a USB. Atomic rename, so it's safe even over
+/// the running install.
+///
+/// When launched from an AppImage ($APPIMAGE set), the whole .AppImage file is
+/// installed — current_exe() points at the bare binary inside the temporary
+/// squashfs mount, and its bundled GTK/libadwaita libraries vanish with the
+/// mount, so a copy of that binary alone dies with "cannot open shared object
+/// file" on any machine missing those libs (the exact problem the AppImage
+/// exists to solve). Otherwise the loose binary is copied to ~/.local/bin.
 pub fn install_self() -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("locating the running binary")?;
-    let dir = config::localbin_dir();
-    std::fs::create_dir_all(&dir)?;
-    let dest = dir.join("linux-app-manager");
-    let staged = dir.join(".linux-app-manager.new");
-    std::fs::copy(&exe, &staged).context("copying binary")?;
+    let source = match running_appimage() {
+        Some(appimage) => appimage,
+        None => std::env::current_exe().context("locating the running binary")?,
+    };
+    let dest = self_install_dest();
+    let dir = dest.parent().ok_or_else(|| anyhow!("bad install dir"))?;
+    std::fs::create_dir_all(dir)?;
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    let staged = dir.join(format!(".{name}.new"));
+    std::fs::copy(&source, &staged).context("copying into place")?;
     let mut perms = std::fs::metadata(&staged)?.permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&staged, perms)?;
@@ -40,7 +67,11 @@ pub fn install_self() -> Result<PathBuf> {
     std::fs::write(icon_dir.join(format!("{SELF_ID}.svg")), SELF_ICON)?;
     let app_dir = config::desktop_dir();
     std::fs::create_dir_all(&app_dir)?;
-    std::fs::write(app_dir.join(format!("{SELF_ID}.desktop")), SELF_DESKTOP)?;
+    // Exec must be the absolute install path: an AppImage is never on $PATH,
+    // and ~/.local/bin isn't on the menu launcher's $PATH on every distro.
+    let desktop =
+        SELF_DESKTOP.replace("Exec=linux-app-manager", &format!("Exec={}", dest.display()));
+    std::fs::write(app_dir.join(format!("{SELF_ID}.desktop")), desktop)?;
 
     std::fs::create_dir_all(config::versions_dir())?;
     std::fs::write(config::versions_dir().join(SELF_ID), env!("CARGO_PKG_VERSION"))?;
