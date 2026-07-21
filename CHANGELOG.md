@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.12 — 2026-07-20
+
+- **`--install <id>` CLI command** — install or update one app by id or name
+  without the GUI (mirrors the Install button). Makes headless installs and
+  testing possible.
+- **Terminal apps are now reachable** — installing a `cli` app (e.g. Riptide)
+  ensures `~/.local/bin` is on your PATH by adding a line to `~/.profile`
+  (idempotent; only if it's missing). Riptide is a command-line downloader with
+  no window — after installing, open a **new** terminal and run `riptide <url>`.
+  The install message now says this explicitly.
+
 ## 0.1.11 — 2026-07-20
 
 - **Every installed app now shows up in the app menu.** `bin` and `tar`

@@ -533,9 +533,12 @@ fn install_bin(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()> {
 }
 
 /// GUI binaries get a menu entry (absolute Exec — ~/.local/bin may not be on
-/// the launcher's $PATH); terminal tools (`cli: true`) stay out of the menu.
+/// the launcher's $PATH); terminal tools (`cli: true`) stay out of the menu but
+/// need ~/.local/bin on PATH so they're runnable by name.
 fn finish_bin_install(src: &Source, dest: &Path) -> Result<()> {
-    if !src.cli {
+    if src.cli {
+        let _ = config::ensure_localbin_on_path();
+    } else {
         write_desktop(src, dest, None)?;
         refresh_menu_caches();
     }

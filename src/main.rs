@@ -95,6 +95,13 @@ fn run_cli() -> Option<glib::ExitCode> {
                 glib::ExitCode::FAILURE
             }
         },
+        "--install" => match args.get(1) {
+            Some(id) => cli_install(id),
+            None => {
+                eprintln!("--install needs an app id or name (see --list)");
+                glib::ExitCode::FAILURE
+            }
+        },
         "--add" => match args.get(1) {
             Some(input) => cli_import(sources::resolve_repo(input).map(|s| vec![s])),
             None => {
@@ -164,6 +171,41 @@ fn run_cli() -> Option<glib::ExitCode> {
     })
 }
 
+/// Install (or update) one app by id or name, headless. Mirrors the GUI's
+/// Install/Update button so it can be scripted and tested.
+fn cli_install(needle: &str) -> glib::ExitCode {
+    let srcs = config::load_sources().unwrap_or_default();
+    let entries = catalog::build(&srcs);
+    let Some(entry) = entries.iter().find(|e| {
+        e.source.id.eq_ignore_ascii_case(needle) || e.source.name.eq_ignore_ascii_case(needle)
+    }) else {
+        eprintln!("no app matching '{needle}' — run --list to see ids");
+        return glib::ExitCode::FAILURE;
+    };
+    let Some(latest) = &entry.latest else {
+        eprintln!("{}: couldn't resolve a latest release to install", entry.source.name);
+        return glib::ExitCode::FAILURE;
+    };
+    if !entry.installable() {
+        eprintln!("{}: no downloadable release asset for this host", entry.source.name);
+        return glib::ExitCode::FAILURE;
+    }
+    match backends::install(&entry.source, latest) {
+        Ok(()) => {
+            println!("Installed {} {}", entry.source.name, latest.version);
+            if entry.source.cli {
+                let pkg = entry.source.package_name();
+                println!("Terminal app — open a new terminal and run: {pkg}");
+            }
+            glib::ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("install failed: {e}");
+            glib::ExitCode::FAILURE
+        }
+    }
+}
+
 /// Merge parsed sources into the live list and save, reporting counts.
 fn cli_import(incoming: anyhow::Result<Vec<Source>>) -> glib::ExitCode {
     let list = match incoming {
@@ -197,6 +239,7 @@ fn print_usage() {
          linux-app-manager                 launch the GUI\n  \
          linux-app-manager --list          print the catalog (installed vs latest)\n  \
          linux-app-manager --add <repo>    add one GitHub repo/URL (auto-detected)\n  \
+         linux-app-manager --install <id>  install/update one app by id or name\n  \
          linux-app-manager --install-self  install THIS copy for this user (+icon, menu entry)\n  \
          linux-app-manager --auto-update   install pending updates for auto-update apps\n  \
          linux-app-manager --follow-user <u>   follow a GitHub user's installable repos\n  \
@@ -842,7 +885,10 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
             Ok(Err(e)) => toast(&ui, &format!("Failed: {e}")),
             Ok(Ok(())) => {
                 if let Some(pkg) = cli_hint {
-                    toast(&ui, &format!("Installed — terminal app: run '{pkg}' in a shell"));
+                    toast(
+                        &ui,
+                        &format!("Installed. '{pkg}' is a terminal app — open a NEW terminal and run: {pkg}"),
+                    );
                 }
             }
             Err(_) => {}

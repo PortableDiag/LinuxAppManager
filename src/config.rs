@@ -57,6 +57,35 @@ pub fn localbin_dir() -> PathBuf {
         .join("bin")
 }
 
+/// Make sure ~/.local/bin is on the user's PATH for future login shells, so a
+/// terminal app installed there is runnable by name (`riptide …`) instead of
+/// "command not found". Idempotent: appends a marked block to ~/.profile only
+/// if that dir isn't already on PATH and the block isn't already there.
+/// Returns Ok(true) if it added the line (takes effect on next login).
+pub fn ensure_localbin_on_path() -> std::io::Result<bool> {
+    let bin = localbin_dir();
+    // Already active in this session's PATH? Nothing to do.
+    if let Some(paths) = std::env::var_os("PATH") {
+        if std::env::split_paths(&paths).any(|p| p == bin) {
+            return Ok(false);
+        }
+    }
+    let Some(home) = dirs::home_dir() else { return Ok(false) };
+    let profile = home.join(".profile");
+    let marker = "# added by Linux App Manager";
+    let existing = std::fs::read_to_string(&profile).unwrap_or_default();
+    if existing.contains(marker) {
+        return Ok(false);
+    }
+    let block = format!(
+        "\n{marker}\nif [ -d \"$HOME/.local/bin\" ] ; then PATH=\"$HOME/.local/bin:$PATH\" ; fi\n"
+    );
+    let mut merged = existing;
+    merged.push_str(&block);
+    std::fs::write(&profile, merged)?;
+    Ok(true)
+}
+
 /// Where `bin`-kind installed-version sidecars are recorded (config dir, so we
 /// don't clutter ~/.local/bin with dotfiles).
 pub fn versions_dir() -> PathBuf {
