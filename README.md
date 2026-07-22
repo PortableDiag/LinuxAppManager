@@ -82,7 +82,11 @@ so it can update itself out of the box.
     (not a one-time import). Followed accounts live in `follows.json`; a manual
     re-scan is `--discover`.
   - **Import official list** — pulls the curated `official-config.json` from this
-    repo (works for the private repo via your `gh` token) and merges it in.
+    repo and merges it in. It also **subscribes you to the maintainer's GitHub
+    account** (the list's `follow` field), so every app they publish afterwards
+    is auto-discovered on later startups — you import once and stay current
+    without re-importing. Curated entries just give flagship apps polished names;
+    everything else arrives automatically via the follow.
   - **Import from file…** — load a `sources.json` or exported config someone shared.
   - **Export config…** — write your list as a shareable `{version, sources}` file
     (drop it straight into a repo as an official list).

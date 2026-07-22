@@ -131,7 +131,7 @@ fn run_cli() -> Option<glib::ExitCode> {
                 cli_import(Ok(sources::discover_follows(&follows)))
             }
         }
-        "--import-official" => cli_import(sources::fetch_official()),
+        "--import-official" => cli_import(sources::import_official()),
         "--import" => match args.get(1) {
             Some(path) => {
                 let parsed = std::fs::read_to_string(path)
@@ -1158,7 +1158,7 @@ fn apply_import(ui: Rc<Ui>, incoming: Vec<Source>) {
 fn import_official(ui: Rc<Ui>) {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let _ = tx.send_blocking(sources::fetch_official());
+        let _ = tx.send_blocking(sources::import_official());
     });
     glib::spawn_future_local(async move {
         match rx.recv().await {

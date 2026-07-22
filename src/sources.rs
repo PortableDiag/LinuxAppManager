@@ -100,8 +100,15 @@ pub fn parse_config(text: &str) -> Result<Vec<Source>> {
     Ok(serde_json::from_value(arr)?)
 }
 
-/// Fetch the curated official list from the repo (public; anonymous API).
-pub fn fetch_official() -> Result<Vec<Source>> {
+/// The curated official document: accounts to `follow` (so the importer keeps
+/// getting new apps automatically) plus any explicitly-curated `sources`.
+pub struct Official {
+    pub follows: Vec<String>,
+    pub sources: Vec<Source>,
+}
+
+/// Fetch and parse the curated official document from the repo (public; anon API).
+pub fn fetch_official() -> Result<Official> {
     let url = format!(
         "https://api.github.com/repos/{}/contents/{}",
         config::OFFICIAL_REPO,
@@ -114,7 +121,44 @@ pub fn fetch_official() -> Result<Vec<Source>> {
         req = req.set("Authorization", &format!("Bearer {token}"));
     }
     let text = req.call()?.into_string()?;
-    parse_config(&text)
+    Ok(Official { follows: parse_follows(&text), sources: parse_config(&text)? })
+}
+
+/// The `follow` accounts declared in a config document (empty if none / bad).
+fn parse_follows(text: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("follow").and_then(|f| f.as_array()).cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|u| u.as_str().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Import the official list: subscribe to the accounts it names to `follow`
+/// (remembered, so the importer auto-discovers new apps on later runs), discover
+/// their installable repos right now, and return those plus the curated sources
+/// — ready to merge. Curated entries win over an auto-discovered one for the
+/// same repo, so flagship apps keep their polished names. Network-heavy.
+pub fn import_official() -> Result<Vec<Source>> {
+    let official = fetch_official()?;
+    for user in &official.follows {
+        let _ = config::add_follow(user);
+    }
+    let repo_of = |s: &Source| match &s.origin {
+        Origin::Github { repo } => Some(repo.to_lowercase()),
+        _ => None,
+    };
+    let curated: std::collections::HashSet<String> =
+        official.sources.iter().filter_map(&repo_of).collect();
+    let mut out = official.sources.clone();
+    for s in discover_follows(&official.follows) {
+        if repo_of(&s).map_or(true, |r| !curated.contains(&r)) {
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// An OPTIONAL GitHub token, taken only from `$GITHUB_TOKEN` / `$GH_TOKEN`.
@@ -535,6 +579,16 @@ mod tests {
             cli: false,
         };
         assert_eq!(pick_asset(&a, &src).unwrap()["name"], "trellis-0.16.2-linux-x86_64");
+    }
+
+    #[test]
+    fn parses_follow_directive() {
+        let doc = r#"{ "version": 1, "follow": ["PortableDiag", " ", "Other"],
+                       "sources": [] }"#;
+        assert_eq!(parse_follows(doc), vec!["PortableDiag", "Other"]);
+        // Absent / array-form configs yield no follows, never an error.
+        assert!(parse_follows(r#"{ "sources": [] }"#).is_empty());
+        assert!(parse_follows("[]").is_empty());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 {
-  "_comment": "Official Linux App Manager list. Served raw from the repo and pulled by the header ▾ menu > Import official list. Same schema as an Export file: only 'sources' is read, anything else is ignored. Edit this to change the recommended apps shipped to users.",
+  "_comment": "Official Linux App Manager list, pulled by ▾ menu > Import official list. 'follow' subscribes the importer to these GitHub accounts, so every installable repo they publish — now and in future — is auto-discovered with no edit to this file. 'sources' additionally curates flagship apps with polished names; a curated entry wins over the auto-discovered one for the same repo.",
   "version": 1,
+  "follow": ["PortableDiag"],
   "sources": [
     {
       "id": "com.procomputation.LinuxAppManager",

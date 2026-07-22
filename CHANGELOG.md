@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.15 — 2026-07-22
+
+- **Importing the official list now subscribes you to the maintainer, so new
+  apps arrive on their own.** `official-config.json` gained a `follow` field
+  (`["PortableDiag"]`); "Import official list" (and `--import-official`) adds
+  those accounts to your follows, discovers their installable repos immediately,
+  and — because follow is a standing subscription — auto-picks-up every repo
+  they publish *later* with no re-import and no edit to the config. Curated
+  `sources` still exist to give flagship apps polished names; a curated entry
+  wins over the auto-discovered one for the same repo. Net effect: the
+  maintainer no longer hand-adds each release to the official list.
+
 ## 0.1.14 — 2026-07-22
 
 - **Fix: versioned bare-binary releases were dropped as "uninstallable."**
