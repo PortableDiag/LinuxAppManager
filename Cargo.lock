@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "linux-app-manager"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "async-channel",

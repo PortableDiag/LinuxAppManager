@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.14 — 2026-07-22
+
+- **Fix: versioned bare-binary releases were dropped as "uninstallable."**
+  Repos whose only release asset is a bare executable named with its version
+  (e.g. `trellis-0.16.2-linux-x86_64`) never appeared — from Follow-user,
+  quick-add, or the official list. Bare-binary detection used "the name has no
+  dot" as a proxy for "no extension," but a version like `0.16.2` carries dots,
+  so the asset was rejected. Detection now recognizes a binary by ruling out
+  what it *isn't* (packages, archives, checksums/signatures, docs, other-OS
+  installers) instead, so versioned single-binary releases install like any
+  other. Added `trellis` to the official list.
+
 ## 0.1.13 — 2026-07-20
 
 - **Fix: updates that never cleared.** An app that changed packaging between

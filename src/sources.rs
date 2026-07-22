@@ -158,6 +158,30 @@ fn is_tarball(name: &str) -> bool {
         .any(|ext| name.ends_with(ext))
 }
 
+/// Whether an (already-lowercased) asset name looks like a bare executable.
+/// We can't test "has no extension" by looking for a dot: a versioned release
+/// like `trellis-0.16.2-linux-x86_64` carries dots in its *version*, not an
+/// extension. So instead we reject the things a binary is *not* — packages,
+/// archives, checksums/signatures, docs, images, other-OS installers — and
+/// treat everything else as a runnable binary.
+fn is_bare_binary(name: &str) -> bool {
+    const NON_BINARY: &[&str] = &[
+        // packages / archives (deb/appimage/tar handled by their own pickers,
+        // but listed here so the bin fallback never grabs them)
+        ".deb", ".rpm", ".appimage", ".flatpak", ".snap", ".zip", ".7z",
+        ".gz", ".xz", ".zst", ".bz2",
+        // checksums / signatures / metadata
+        ".sha256", ".sha512", ".sha1", ".md5", ".asc", ".sig", ".minisig",
+        ".gpg", ".pem", ".sbom", ".spdx", ".json", ".yml", ".yaml",
+        // docs / images
+        ".txt", ".md", ".log", ".pdf", ".png", ".jpg", ".jpeg", ".gif",
+        ".svg", ".ico",
+        // other-OS installers
+        ".exe", ".msi", ".dmg", ".pkg", ".apk", ".blockmap",
+    ];
+    !NON_BINARY.iter().any(|ext| name.ends_with(ext))
+}
+
 /// From assets already filtered to the right kind, pick the one for this host's
 /// architecture: prefer a name carrying a host-arch token; otherwise the first
 /// that carries no *foreign*-arch token (arch-neutral); else the first.
@@ -222,7 +246,7 @@ fn pick_asset<'a>(assets: &'a [serde_json::Value], src: &Source) -> Option<&'a s
             }
             assets
                 .iter()
-                .filter(|a| !asset_name(a).contains('.'))
+                .filter(|a| is_bare_binary(&asset_name(a)))
                 .collect()
         }
     };
@@ -386,7 +410,7 @@ pub fn detect_kind(assets: &[serde_json::Value], exec: &str) -> Option<Kind> {
         return Some(Kind::Tar);
     }
     let nodot: Vec<&serde_json::Value> =
-        assets.iter().filter(|a| !asset_name(a).contains('.')).collect();
+        assets.iter().filter(|a| is_bare_binary(&asset_name(a))).collect();
     if best_by_arch_strict(&nodot).is_some() {
         return Some(Kind::Bin);
     }
@@ -478,6 +502,7 @@ mod tests {
             package: Some("tabby".into()),
             install_path: None,
             auto_update: false,
+            cli: false,
         };
         // arm64 deb listed first must NOT win on x86_64.
         let a = assets(&[
@@ -487,6 +512,38 @@ mod tests {
         ]);
         let picked = pick_asset(&a, &src).unwrap();
         assert_eq!(picked["name"], "tabby-1.0-linux-x64.deb");
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn detects_versioned_bare_binary() {
+        // trellis ships one asset: a bare binary whose *version* carries dots.
+        // The old "has no dot" test wrongly rejected it as uninstallable.
+        let a = assets(&["trellis-0.16.2-linux-x86_64"]);
+        assert_eq!(detect_kind(&a, "trellis"), Some(Kind::Bin));
+
+        // And it must be pickable once the kind is bin.
+        let src = Source {
+            id: "trellis".into(),
+            name: "trellis".into(),
+            description: None,
+            kind: Kind::Bin,
+            origin: Origin::Github { repo: "PortableDiag/trellis".into() },
+            package: Some("trellis".into()),
+            install_path: None,
+            auto_update: false,
+            cli: false,
+        };
+        assert_eq!(pick_asset(&a, &src).unwrap()["name"], "trellis-0.16.2-linux-x86_64");
+    }
+
+    #[test]
+    fn sidecars_are_not_binaries() {
+        // A checksum/signature next to a versioned binary must not be mistaken
+        // for the executable.
+        assert!(!is_bare_binary("trellis-0.16.2-linux-x86_64.sha256"));
+        assert!(!is_bare_binary("trellis-0.16.2.tar.gz"));
+        assert!(is_bare_binary("trellis-0.16.2-linux-x86_64"));
     }
 }
 

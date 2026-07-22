@@ -34,6 +34,14 @@
       "kind": "bin",
       "package": "imgview",
       "origin": { "type": "github", "repo": "PortableDiag/ImgView" }
+    },
+    {
+      "id": "com.procomputation.Trellis",
+      "name": "Trellis",
+      "description": "Hierarchical, spatial note-taking — a tree of free-form card canvases (Rust + egui).",
+      "kind": "bin",
+      "package": "trellis",
+      "origin": { "type": "github", "repo": "PortableDiag/trellis" }
     }
   ]
 }
