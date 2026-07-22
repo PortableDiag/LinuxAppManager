@@ -43,6 +43,30 @@
       "kind": "bin",
       "package": "trellis",
       "origin": { "type": "github", "repo": "PortableDiag/trellis" }
+    },
+    {
+      "id": "tabby",
+      "name": "Tabby",
+      "description": "Modern, highly configurable terminal emulator (local / SSH / serial).",
+      "kind": "appimage",
+      "package": "tabby",
+      "origin": { "type": "github", "repo": "Eugeny/tabby" }
+    },
+    {
+      "id": "cherrytree",
+      "name": "CherryTree",
+      "description": "Hierarchical note-taking app with rich text and code syntax highlighting.",
+      "kind": "appimage",
+      "package": "cherrytree",
+      "origin": { "type": "github", "repo": "giuspen/cherrytree" }
+    },
+    {
+      "id": "klogg",
+      "name": "klogg",
+      "description": "Really fast log explorer — search and filter very large log files (successor to glogg).",
+      "kind": "deb",
+      "package": "klogg",
+      "origin": { "type": "github", "repo": "variar/klogg" }
     }
   ]
 }
