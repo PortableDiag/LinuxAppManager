@@ -384,7 +384,11 @@ fn download(src: &Source, latest: &Latest) -> Result<PathBuf> {
             // but DON'T auto-follow: the 302 points at a pre-signed URL that
             // rejects a stray Authorization header, so we fetch the Location
             // ourselves, unauthenticated. (Public repos need no token.)
-            let agent = ureq::builder().redirects(0).build();
+            let agent = ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout_connect(std::time::Duration::from_secs(10))
+                .timeout_read(std::time::Duration::from_secs(30))
+                .build();
             let mut req = agent
                 .get(url)
                 .set("User-Agent", "LinuxAppManager")
@@ -395,7 +399,8 @@ fn download(src: &Source, latest: &Latest) -> Result<PathBuf> {
             let resp = req.call().context("asset request failed")?;
             match resp.header("Location") {
                 Some(loc) => Box::new(
-                    ureq::get(loc)
+                    crate::sources::http_agent()
+                        .get(loc)
                         .set("User-Agent", "LinuxAppManager")
                         .call()
                         .context("asset redirect failed")?
@@ -405,7 +410,8 @@ fn download(src: &Source, latest: &Latest) -> Result<PathBuf> {
             }
         } else {
             Box::new(
-                ureq::get(url)
+                crate::sources::http_agent()
+                    .get(url)
                     .set("User-Agent", "LinuxAppManager")
                     .call()
                     .context("download request failed")?

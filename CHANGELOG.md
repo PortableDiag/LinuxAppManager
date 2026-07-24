@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.16 — 2026-07-24
+
+- **Fix: the Install/Update button could click into a void.** Network requests
+  (release lookups and the actual download) had **no timeout**, so a stalled
+  connection to GitHub or its asset CDN hung the worker thread forever — the
+  button greyed on click, no error toast fired, and the list never refreshed:
+  "clicked and nothing happened." All HTTP now uses a shared agent with a 10s
+  connect / 30s per-read timeout, so a stall fails fast with a visible error
+  instead of hanging. (The read timeout is per socket read, so large downloads
+  that keep streaming are unaffected.)
+- **No more silent outcomes.** A successful non-terminal install now toasts
+  "Installed <name>" (previously only the row redrew — invisible if the refresh
+  then couldn't resolve versions); an unresolved release reports "couldn't reach
+  GitHub… possibly rate-limited" instead of a silent no-op; and a worker thread
+  that dies without reporting now toasts "Action interrupted" instead of nothing.
+- **"Version unknown" is no longer a dead end.** An app that App Manager didn't
+  install itself (hand-copied, pre-placed, or apt) has no version sidecar and no
+  readable version, so it honestly shows "Installed · version unknown" — but the
+  row only offered **Open**, with no way to adopt the real version. When a
+  downloadable release exists, the primary button is now **Reinstall**: it
+  fetches the current release and records its version, clearing the "unknown" in
+  one click. (Open returns once the version is known.)
+
 ## 0.1.15 — 2026-07-22
 
 - **Importing the official list now subscribes you to the maintainer, so new

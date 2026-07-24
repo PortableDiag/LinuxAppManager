@@ -4,6 +4,19 @@ use crate::model::{Kind, Latest, Origin, Source};
 use crate::{config, model};
 use anyhow::Result;
 use std::path::Path;
+use std::time::Duration;
+
+/// Shared HTTP agent with connect + per-read timeouts. Without these, ureq waits
+/// forever: a stalled connection to GitHub (or its asset CDN) would hang the
+/// worker thread indefinitely, leaving the GUI's Install button clicked-but-dead
+/// with no error and no refresh. The read timeout is per socket read, so a large
+/// download that keeps streaming is unaffected — only a genuine stall trips it.
+pub fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(30))
+        .build()
+}
 
 /// Best-effort latest release. Errors (network, rate-limit) collapse to `None`
 /// so one bad source never blanks the whole catalog. The second tuple element
@@ -28,7 +41,7 @@ pub fn resolve_latest(src: &Source) -> (Option<Latest>, Option<Kind>) {
 
 fn github_latest(src: &Source, repo: &str) -> Result<(Option<Latest>, Option<Kind>)> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let mut req = ureq::get(&url)
+    let mut req = http_agent().get(&url)
         .set("User-Agent", "LinuxAppManager")
         .set("Accept", "application/vnd.github+json");
     // Anonymous by default (public repos); an optional env token is sent only if
@@ -114,7 +127,7 @@ pub fn fetch_official() -> Result<Official> {
         config::OFFICIAL_REPO,
         config::OFFICIAL_PATH
     );
-    let mut req = ureq::get(&url)
+    let mut req = http_agent().get(&url)
         .set("User-Agent", "LinuxAppManager")
         .set("Accept", "application/vnd.github.raw+json");
     if let Some(token) = github_token() {
@@ -395,7 +408,7 @@ fn gh_repo_pages(base: &str) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for page in 1..=10 {
         let url = format!("{base}{sep}per_page=100&page={page}");
-        let mut req = ureq::get(&url)
+        let mut req = http_agent().get(&url)
             .set("User-Agent", "LinuxAppManager")
             .set("Accept", "application/vnd.github+json");
         if let Some(t) = github_token() {
@@ -417,7 +430,7 @@ fn gh_repo_pages(base: &str) -> Vec<serde_json::Value> {
 /// release, then delegates to `detect_kind` on its assets.
 fn detect_installable(repo: &str, exec: &str) -> Option<Kind> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let mut req = ureq::get(&url)
+    let mut req = http_agent().get(&url)
         .set("User-Agent", "LinuxAppManager")
         .set("Accept", "application/vnd.github+json");
     if let Some(t) = github_token() {
@@ -502,7 +515,7 @@ fn parse_repo(input: &str) -> Option<String> {
 
 /// GET a GitHub API endpoint as JSON, with the user's token if available.
 fn gh_get(url: &str) -> Result<serde_json::Value> {
-    let mut req = ureq::get(url)
+    let mut req = http_agent().get(url)
         .set("User-Agent", "LinuxAppManager")
         .set("Accept", "application/vnd.github+json");
     if let Some(t) = github_token() {

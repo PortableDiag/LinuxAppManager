@@ -523,7 +523,7 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
             btn.set_valign(gtk::Align::Center);
             row.add_suffix(&btn);
         }
-    } else if let Some((label, action, suggested)) = normal_primary(status, entry.source.cli) {
+    } else if let Some((label, action, suggested)) = normal_primary(status, entry.source.cli, entry.installable()) {
         let btn = gtk::Button::with_label(label);
         btn.set_valign(gtk::Align::Center);
         if suggested {
@@ -543,10 +543,18 @@ fn app_row(ui: &Rc<Ui>, entry: Entry) -> adw::ActionRow {
 
 /// Install/Update/Open label for a normal (non-self) app. Terminal apps get no
 /// Open button — there is no window to open; they're run from a shell.
-fn normal_primary(status: Status, cli: bool) -> Option<(&'static str, Action, bool)> {
+///
+/// "Installed · version unknown" means the app got here some way App Manager
+/// didn't record (hand-copied, pre-placed, apt), so there's no version sidecar
+/// and nothing to read out of a bare binary/AppImage. When a downloadable
+/// release exists, the primary becomes **Reinstall**: it fetches the current
+/// release and records its version, turning the dead-end "unknown" into a
+/// one-click fix. (Open returns as soon as the version is known.)
+fn normal_primary(status: Status, cli: bool, installable: bool) -> Option<(&'static str, Action, bool)> {
     match status {
         Status::NotInstalled => Some(("Install", Action::Install, true)),
         Status::UpdateAvailable => Some(("Update", Action::Update, true)),
+        Status::Unknown if installable => Some(("Reinstall", Action::Update, true)),
         Status::UpToDate | Status::Unknown if cli => None,
         Status::UpToDate | Status::Unknown => Some(("Open", Action::Open, false)),
     }
@@ -709,7 +717,7 @@ fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
         if let Some(btn) = self_action_button(ui, &entry, status) {
             bx.append(&btn);
         }
-    } else if let Some((label, action, suggested)) = normal_primary(status, entry.source.cli) {
+    } else if let Some((label, action, suggested)) = normal_primary(status, entry.source.cli, entry.installable()) {
         let btn = gtk::Button::with_label(label);
         if suggested {
             btn.add_css_class("suggested-action");
@@ -866,13 +874,28 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
     // run it once the install lands.
     let cli_hint = (entry.source.cli && matches!(action, Action::Install | Action::Update))
         .then(|| entry.source.package_name().to_string());
+    // A positive confirmation for the toast, so a successful non-cli install
+    // isn't silent (previously only the row changed on refresh — invisible if
+    // the refresh then failed to resolve versions).
+    let name = entry.source.name.clone();
+    let done = match action {
+        Action::Install => "Installed",
+        Action::Update => "Updated",
+        Action::Remove => "Removed",
+        Action::Open => "",
+    };
 
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
         let res = match action {
             Action::Install | Action::Update => match &entry.latest {
                 Some(l) => backends::install(&entry.source, l),
-                None => Ok(()),
+                // No resolved release is a real failure (GitHub unreachable /
+                // rate-limited), not a silent no-op — say so.
+                None => Err(anyhow::anyhow!(
+                    "couldn't reach GitHub to resolve a release — check your \
+                     connection, or you may be rate-limited (try again later)"
+                )),
             },
             Action::Remove => backends::remove(&entry.source),
             Action::Open => Ok(()),
@@ -883,15 +906,16 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
     glib::spawn_future_local(async move {
         match rx.recv().await {
             Ok(Err(e)) => toast(&ui, &format!("Failed: {e}")),
-            Ok(Ok(())) => {
-                if let Some(pkg) = cli_hint {
-                    toast(
-                        &ui,
-                        &format!("Installed. '{pkg}' is a terminal app — open a NEW terminal and run: {pkg}"),
-                    );
-                }
-            }
-            Err(_) => {}
+            Ok(Ok(())) => match cli_hint {
+                Some(pkg) => toast(
+                    &ui,
+                    &format!("Installed. '{pkg}' is a terminal app — open a NEW terminal and run: {pkg}"),
+                ),
+                None => toast(&ui, &format!("{done} {name}")),
+            },
+            // The worker thread died without reporting (dropped sender) — never
+            // leave the click with no feedback at all.
+            Err(_) => toast(&ui, "Action interrupted — please try again"),
         }
         refresh(ui);
     });
