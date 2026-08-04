@@ -16,6 +16,7 @@ use catalog::{Entry, Status};
 use model::{Kind, Origin, Source};
 use gtk::{gio, glib};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 const APP_ID: &str = "com.procomputation.LinuxAppManager";
@@ -30,6 +31,12 @@ struct Ui {
     entries: RefCell<Vec<Entry>>,
     /// Guards against overlapping refreshes.
     busy: RefCell<bool>,
+    /// App ids with an install/update/removal running. `wire` greys the button
+    /// that was clicked, but that is not enough on its own: the row and the
+    /// detail page each build their own button, and a Refresh mid-download
+    /// rebuilds the row with a fresh, sensitive one. Tracking the id instead of
+    /// the widget survives all of that.
+    inflight: RefCell<HashSet<String>>,
 }
 
 fn main() -> glib::ExitCode {
@@ -321,6 +328,7 @@ fn build_ui(app: &adw::Application) {
         nav,
         entries: RefCell::new(Vec::new()),
         busy: RefCell::new(false),
+        inflight: RefCell::new(HashSet::new()),
     });
 
     let ui_btn = ui.clone();
@@ -798,6 +806,7 @@ fn build_detail_page(ui: &Rc<Ui>, entry: Entry) -> adw::NavigationPage {
 
 /// Detail-page action: run it, then return to the list (which refreshes).
 fn wire_detail(btn: &gtk::Button, ui: &Rc<Ui>, entry: Entry, action: Action) {
+    grey_while_inflight(btn, ui, &entry.source.id);
     let ui = ui.clone();
     btn.connect_clicked(move |b| {
         b.set_sensitive(false);
@@ -856,6 +865,7 @@ enum Action {
 }
 
 fn wire(btn: &gtk::Button, ui: &Rc<Ui>, entry: Entry, action: Action) {
+    grey_while_inflight(btn, ui, &entry.source.id);
     let ui = ui.clone();
     btn.connect_clicked(move |b| {
         b.set_sensitive(false);
@@ -863,10 +873,33 @@ fn wire(btn: &gtk::Button, ui: &Rc<Ui>, entry: Entry, action: Action) {
     });
 }
 
+/// These buttons are rebuilt from scratch on every refresh, so a button that
+/// was greyed by its own click comes back sensitive if the user hits Refresh
+/// mid-download. Re-apply the disabled state from the app id instead.
+fn grey_while_inflight(btn: &gtk::Button, ui: &Rc<Ui>, id: &str) {
+    if ui.inflight.borrow().contains(id) {
+        btn.set_sensitive(false);
+        btn.set_tooltip_text(Some("Already working on this app…"));
+    }
+}
+
 /// Run a backend action off-thread, then refresh (Open is fire-and-forget).
 fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
     if let Action::Open = action {
         let _ = backends::open(&entry.source);
+        return;
+    }
+
+    // One action per app at a time. Without this a second click starts a second
+    // download to the same cache path, which breaks the first one with ETXTBSY
+    // ("Text file busy") when it tries to unpack — the download that was
+    // already working is the one that dies.
+    let id = entry.source.id.clone();
+    if !ui.inflight.borrow_mut().insert(id.clone()) {
+        toast(
+            &ui,
+            &format!("{} is already working — hang on", entry.source.name),
+        );
         return;
     }
 
@@ -884,6 +917,19 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
         Action::Remove => "Removed",
         Action::Open => "",
     };
+
+    // A release AppImage can be well over 100 MB, and until now the only sign
+    // anything was happening was the clicked button going grey — which reads as
+    // "nothing happened", and invites the second click that used to break it.
+    // timeout(0) pins the toast up until the action reports back.
+    let progress = adw::Toast::new(&match action {
+        Action::Install => format!("Downloading {name}… this can take a few minutes"),
+        Action::Update => format!("Downloading the {name} update… this can take a few minutes"),
+        Action::Remove => format!("Removing {name}…"),
+        Action::Open => String::new(),
+    });
+    progress.set_timeout(0);
+    ui.toasts.add_toast(progress.clone());
 
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
@@ -904,7 +950,10 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
     });
 
     glib::spawn_future_local(async move {
-        match rx.recv().await {
+        let outcome = rx.recv().await;
+        progress.dismiss();
+        ui.inflight.borrow_mut().remove(&id);
+        match outcome {
             Ok(Err(e)) => toast(&ui, &format!("Failed: {e}")),
             Ok(Ok(())) => match cli_hint {
                 Some(pkg) => toast(

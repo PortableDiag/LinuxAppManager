@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased
+## 0.1.17 — 2026-08-04
+
+- **Fix: a second click on Update killed the download the first click had
+  already started.** Every install of an app downloads to the same cache path,
+  `~/.cache/linux-app-manager/<id>.appimage`. Nothing stopped two installs of
+  one app running at once, and when they did, the second one truncated and
+  rewrote the file the first was about to unpack — Linux refuses to exec a file
+  that anyone still holds open for writing, so the first install died on
+  `ETXTBSY` ("Text file busy"). The symptom was self-sustaining: a 126 MB
+  AppImage download showed **no progress of any kind** (the clicked button just
+  went grey), which reads as "nothing happened", which invites the second click
+  that breaks it.
+
+  Three fixes, because the bug had three halves:
+
+  - **An install now shows that it's running.** Clicking Install/Update raises a
+    toast — "Downloading the <name> update… this can take a few minutes" — that
+    stays up until the action reports back, instead of leaving a long download
+    completely invisible.
+  - **One action per app at a time.** Both the UI and `backends::install` refuse
+    a second action for an app that already has one running, and say so. The
+    guard is keyed on the app id, not the widget: the row and the detail page
+    each build their own button, and a Refresh mid-download used to rebuild the
+    row with a fresh, sensitive one. Rebuilt buttons now come back greyed while
+    their app is busy.
+  - **`ETXTBSY` is retried, not fatal.** The in-process guard can't see the
+    systemd `--auto-update` timer, which is a separate process writing to the
+    same cache path. The unpack now waits out a concurrent writer (200ms
+    doubling to ~3s) instead of failing an install that was about to work.
+
+  Also fixed on the way past: a failed unpack left an empty `.<id>.extract`
+  directory behind on every attempt, because the error path returned before the
+  cleanup.
 
 - **Docs: the README roadmap described a less capable app than the one in the
   repo.** It still listed the per-app detail view, the systemd background update
@@ -11,9 +43,8 @@
   the headless CLI, and keeps only the genuinely unbuilt items (search/sort/
   filter chips, Update-all, Flatpak passthrough, themes) under "Next".
 
-  Documentation only — **no version bump and no tag.** The binary is unchanged,
-  and releasing an identical one would push a pointless "update available" to
-  every install, App Manager's own entry included.
+  Documentation only; it was held back from release deliberately, and ships
+  here alongside the fix above.
 
 ## 0.1.16 — 2026-07-24
 

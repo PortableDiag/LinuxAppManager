@@ -9,16 +9,51 @@
 use crate::config;
 use crate::model::{Kind, Latest, Source};
 use anyhow::{anyhow, Context, Result};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::Duration;
 
 // Embedded so a loose binary (USB / fresh download) can install itself with its
 // icon and menu entry, no network and no side files needed.
 const SELF_ICON: &str = include_str!("../data/com.procomputation.LinuxAppManager.svg");
 const SELF_DESKTOP: &str = include_str!("../data/com.procomputation.LinuxAppManager.desktop");
 const SELF_ID: &str = "com.procomputation.LinuxAppManager";
+
+/// Ids with an install already running.
+///
+/// Every install of an app downloads to the SAME cache path, so two of them at
+/// once are not merely wasteful: the second one truncates and rewrites the file
+/// the first is about to exec, and Linux refuses to exec a file that is open for
+/// writing anywhere (ETXTBSY). The first install then dies on an error the user
+/// never asked for, which is exactly what a impatient double-click produces —
+/// click Update, see nothing happen during a long download, click again, break
+/// the download that was already working.
+static IN_FLIGHT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Holds an id in `IN_FLIGHT` for as long as the install runs; releases it on
+/// drop, including on an early `?` return or a panic.
+struct InFlight(String);
+
+impl InFlight {
+    /// `None` when an install of this id is already running.
+    fn acquire(id: &str) -> Option<Self> {
+        let mut set = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        set.insert(id.to_string()).then(|| InFlight(id.to_string()))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
 
 /// The AppImage file we are currently running from, if any. The AppImage
 /// runtime exports $APPIMAGE = absolute path of the .AppImage file.
@@ -256,6 +291,15 @@ fn on_path(name: &str) -> bool {
 
 /// Download the latest release and install/update it.
 pub fn install(src: &Source, latest: &Latest) -> Result<()> {
+    // Refuse rather than queue: a queued second install would re-download the
+    // same asset and reinstall what just landed, and the caller has no way to
+    // tell that from a stuck click. See IN_FLIGHT.
+    let _busy = InFlight::acquire(&src.id).ok_or_else(|| {
+        anyhow!(
+            "{} is already installing — wait for that to finish",
+            src.name
+        )
+    })?;
     std::fs::create_dir_all(config::cache_dir())?;
     let file = download(src, latest)?;
     let result = match src.kind {
@@ -370,6 +414,40 @@ fn spawn_app(cmd: &Path) -> Result<()> {
 
 // --- helpers ---------------------------------------------------------------
 
+/// `ETXTBSY` — the kernel refuses to exec a file that anyone still holds open
+/// for writing. `std::io::ErrorKind::ExecutableFileBusy` is still unstable, so
+/// match the raw errno.
+const ETXTBSY: i32 = 26;
+
+/// Run an AppImage's own `--appimage-extract` (handled by its embedded runtime,
+/// so no FUSE) with `workdir` as the cwd — it unpacks to `./squashfs-root`.
+///
+/// Retries briefly on ETXTBSY. IN_FLIGHT rules out our own concurrent installs,
+/// but the systemd `--auto-update` timer is a separate process writing to the
+/// same cache path, and that race is invisible from here. It clears the instant
+/// the other writer closes the file, so a few hundred milliseconds of patience
+/// beats failing an install that was about to work.
+fn appimage_extract(file: &Path, workdir: &Path) -> Result<std::process::ExitStatus> {
+    let mut delay = Duration::from_millis(200);
+    loop {
+        let err = match Command::new(file)
+            .arg("--appimage-extract")
+            .current_dir(workdir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) => return Ok(status),
+            Err(e) => e,
+        };
+        if err.raw_os_error() != Some(ETXTBSY) || delay > Duration::from_secs(2) {
+            return Err(err).with_context(|| format!("unpacking {}", file.display()));
+        }
+        std::thread::sleep(delay);
+        delay *= 2;
+    }
+}
+
 fn download(src: &Source, latest: &Latest) -> Result<PathBuf> {
     let dest = config::cache_dir().join(format!("{}{}", src.id, src.kind.ext()));
     let url = &latest.download_url;
@@ -469,15 +547,15 @@ fn install_appimage(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()>
     let workdir = config::apps_dir().join(format!(".{}.extract", src.id));
     let _ = std::fs::remove_dir_all(&workdir);
     std::fs::create_dir_all(&workdir)?;
-    // --appimage-extract is handled by the AppImage's embedded runtime and
-    // works without FUSE; it unpacks to ./squashfs-root.
-    let status = Command::new(file)
-        .arg("--appimage-extract")
-        .current_dir(&workdir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .context("unpacking the AppImage")?;
+    // Clean the workdir up on the failure path too — an early `?` here used to
+    // leave an empty .<id>.extract behind on every failed attempt.
+    let status = match appimage_extract(file, &workdir) {
+        Ok(status) => status,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&workdir);
+            return Err(e);
+        }
+    };
     let tree = workdir.join("squashfs-root");
     if !status.success() || !tree.join("AppRun").exists() {
         let _ = std::fs::remove_dir_all(&workdir);
@@ -532,12 +610,13 @@ fn update_self_bundle(latest: &Latest, file: &PathBuf) -> Result<()> {
     let workdir = config::cache_dir().join(".self-extract");
     let _ = std::fs::remove_dir_all(&workdir);
     std::fs::create_dir_all(&workdir)?;
-    let status = Command::new(file)
-        .arg("--appimage-extract")
-        .current_dir(&workdir)
-        .stdout(std::process::Stdio::null())
-        .status()
-        .context("unpacking the update")?;
+    let status = match appimage_extract(file, &workdir) {
+        Ok(status) => status,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&workdir);
+            return Err(e);
+        }
+    };
     let tree = workdir.join("squashfs-root");
     if !status.success() || !tree.join("AppRun").is_file() {
         let _ = std::fs::remove_dir_all(&workdir);
@@ -785,5 +864,71 @@ fn run_pkexec(args: &[&str]) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!("command failed: pkexec {}", args.join(" ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A writer holding the file open makes exec fail with ETXTBSY. The retry
+    /// has to outlive that writer instead of failing the install — this is the
+    /// cross-process case (the systemd --auto-update timer downloading to the
+    /// same cache path) that IN_FLIGHT cannot see.
+    #[test]
+    fn appimage_extract_waits_out_a_concurrent_writer() {
+        let dir = std::env::temp_dir().join(format!("lam-etxtbsy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake.appimage");
+        std::fs::write(&fake, "#!/bin/sh\nmkdir -p squashfs-root\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Hold a write handle open across the first couple of retry attempts.
+        let held = std::fs::OpenOptions::new().write(true).open(&fake).unwrap();
+
+        // Precondition: without the retry this really does fail. If the kernel
+        // ever stops refusing, this test would otherwise pass while proving
+        // nothing.
+        assert_eq!(
+            Command::new(&fake).status().unwrap_err().raw_os_error(),
+            Some(ETXTBSY),
+            "exec of a file held open for writing must fail with ETXTBSY"
+        );
+
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            drop(held);
+        });
+
+        let workdir = dir.join("work");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let status = appimage_extract(&fake, &workdir).expect("retry must outlast the writer");
+        writer.join().unwrap();
+
+        assert!(status.success());
+        assert!(
+            workdir.join("squashfs-root").is_dir(),
+            "the extract must actually have run, not just returned a status"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_flight_admits_one_install_per_app() {
+        let held = InFlight::acquire("app.one").expect("first acquire wins");
+        assert!(
+            InFlight::acquire("app.one").is_none(),
+            "a second install of the same app must be refused, not queued"
+        );
+        assert!(
+            InFlight::acquire("app.two").is_some(),
+            "a different app must be unaffected"
+        );
+        drop(held);
+        assert!(
+            InFlight::acquire("app.one").is_some(),
+            "the id must be released once the install finishes"
+        );
     }
 }
