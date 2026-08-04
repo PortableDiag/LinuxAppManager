@@ -145,12 +145,16 @@ finished `.AppImage` lands back in `dist/`.)
 
 ## Roadmap
 
-Shipped in **v0.1**: GitHub / URL / local sources, deb + AppImage backends,
-installed-vs-latest list, install / update / open / remove, refresh.
+Shipped through **v0.1.16**: GitHub / URL / local sources; all four backends
+(`deb`, `appimage`, `bin`, `tar`); installed-vs-latest list; install / update /
+open / remove / reinstall; refresh; per-app detail view (release notes, download
+size, source, kind); follow-a-GitHub-user as a standing subscription;
+import/export and the curated official list; background update checks via a
+systemd user timer; in-app self-update; and a headless CLI (`--list`,
+`--install`, `--install-self`, `--auto-update`, `--follow-user`, `--discover`,
+`--import-official`, `--import`, `--export`).
 
-Next: search / sort / filter chips, per-app detail view (changelog, size, dates),
-Update-all, background update checks (systemd user timer),
-Flatpak passthrough, in-app self-update, themes.
+Next: search / sort / filter chips, Update-all, Flatpak passthrough, themes.
 
 ## License
 

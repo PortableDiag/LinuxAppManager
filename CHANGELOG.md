@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Docs: the README roadmap described a less capable app than the one in the
+  repo.** It still listed the per-app detail view, the systemd background update
+  check and in-app self-update as "Next" — all three shipped between 0.1.1 and
+  0.1.16 — and its "Shipped in v0.1" line named only the `deb` and `appimage`
+  backends, omitting `bin` and `tar`, which between them cover half the official
+  list. The roadmap now states what actually shipped through 0.1.16, including
+  the headless CLI, and keeps only the genuinely unbuilt items (search/sort/
+  filter chips, Update-all, Flatpak passthrough, themes) under "Next".
+
+  Documentation only — **no version bump and no tag.** The binary is unchanged,
+  and releasing an identical one would push a pointless "update available" to
+  every install, App Manager's own entry included.
+
 ## 0.1.16 — 2026-07-24
 
 - **Fix: the Install/Update button could click into a void.** Network requests
