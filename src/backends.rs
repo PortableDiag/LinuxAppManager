@@ -531,7 +531,7 @@ fn install_appimage(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()>
         let mut perms = std::fs::metadata(&dest)?.permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&dest, perms)?;
-        write_desktop(src, &dest, None)?;
+        write_desktop(src, &dest, None, None)?;
         std::fs::write(version_sidecar(src), &latest.version)?;
         refresh_menu_caches();
         return Ok(());
@@ -571,7 +571,12 @@ fn install_appimage(src: &Source, latest: &Latest, file: &PathBuf) -> Result<()>
     // Retire a pre-0.1.11 file-form install from the default spot.
     let _ = std::fs::remove_file(config::appimage_dir().join(format!("{}.AppImage", src.id)));
 
-    write_desktop(src, &dest.join("AppRun"), tree_icon(&dest).as_deref())?;
+    write_desktop(
+        src,
+        &dest.join("AppRun"),
+        tree_icon(&dest).as_deref(),
+        tree_desktop(&dest).as_deref(),
+    )?;
     std::fs::write(version_sidecar(src), &latest.version)?;
     refresh_menu_caches();
     Ok(())
@@ -674,7 +679,7 @@ fn finish_bin_install(src: &Source, dest: &Path) -> Result<()> {
     if src.cli {
         let _ = config::ensure_localbin_on_path();
     } else {
-        write_desktop(src, dest, None)?;
+        write_desktop(src, dest, None, None)?;
         refresh_menu_caches();
     }
     Ok(())
@@ -789,26 +794,90 @@ pub fn record_bin_version(src: &Source, version: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_desktop(src: &Source, exec: &Path, icon: Option<&Path>) -> Result<()> {
+fn write_desktop(src: &Source, exec: &Path, icon: Option<&Path>, shipped: Option<&Path>) -> Result<()> {
     let dir = config::desktop_dir();
     std::fs::create_dir_all(&dir)?;
     let mut f = std::fs::File::create(desktop_path(src))?;
+    let shipped = shipped
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| ShippedEntry::parse(&t))
+        .unwrap_or_default();
     write!(
         f,
         "[Desktop Entry]\n\
          Type=Application\n\
          Name={name}\n\
-         Exec={exec}\n\
+         Exec={exec}{args}\n\
          Icon={icon}\n\
          Terminal=false\n\
-         Categories=Utility;\n",
+         Categories={categories}\n",
         name = src.name,
         exec = exec.display(),
+        args = shipped.exec_args,
         icon = icon
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| src.id.clone()),
+        categories = shipped.categories.as_deref().unwrap_or("Utility;"),
     )?;
+    for line in &shipped.carried {
+        writeln!(f, "{line}")?;
+    }
     Ok(())
+}
+
+/// The parts of an app's own `.desktop` file that must survive into the one we
+/// write. Without the Exec field code (`%F`, `%U`…) a file manager's "Open
+/// with" launches the app with no file at all; without `MimeType` the app is
+/// not offered for the file in the first place.
+#[derive(Default)]
+struct ShippedEntry {
+    /// " %F" — the field codes from the shipped Exec, with their leading space.
+    exec_args: String,
+    categories: Option<String>,
+    /// Whole `Key=value` lines copied verbatim.
+    carried: Vec<String>,
+}
+
+impl ShippedEntry {
+    const CARRY: &'static [&'static str] =
+        &["GenericName", "Comment", "Keywords", "MimeType", "StartupWMClass", "StartupNotify"];
+
+    fn parse(text: &str) -> Self {
+        let mut out = Self::default();
+        let mut in_main = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_main = line == "[Desktop Entry]";
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=').filter(|_| in_main) else { continue };
+            match key.trim() {
+                "Exec" => {
+                    out.exec_args = value
+                        .split_whitespace()
+                        .filter(|w| matches!(*w, "%f" | "%F" | "%u" | "%U"))
+                        .map(|w| format!(" {w}"))
+                        .collect();
+                }
+                "Categories" if !value.trim().is_empty() => {
+                    out.categories = Some(value.trim().to_string())
+                }
+                k if Self::CARRY.contains(&k) => out.carried.push(format!("{k}={}", value.trim())),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// The `.desktop` file an AppImage ships at the root of its tree.
+fn tree_desktop(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_file() && p.extension().is_some_and(|x| x == "desktop"))
 }
 
 /// Where an AppImage lives: a custom `install_path` if set, else
@@ -869,6 +938,18 @@ fn run_pkexec(args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shipped_entry_keeps_what_open_with_needs() {
+        let e = super::ShippedEntry::parse(
+            "[Desktop Entry]\nExec=gapless %F\nCategories=AudioVideo;Audio;\n\
+             MimeType=audio/mpeg;audio/flac;\nName=Gapless\n\
+             [Desktop Action x]\nExec=other %U\nMimeType=nope;\n",
+        );
+        assert_eq!(e.exec_args, " %F");
+        assert_eq!(e.categories.as_deref(), Some("AudioVideo;Audio;"));
+        assert_eq!(e.carried, vec!["MimeType=audio/mpeg;audio/flac;".to_string()]);
+    }
+
     use super::*;
 
     /// A writer holding the file open makes exec fail with ETXTBSY. The retry

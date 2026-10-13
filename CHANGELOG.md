@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.18 — 2026-10-13
+
+- **Fix: "Open with" launched an installed app without the file.** The menu
+  entry written for an unpacked AppImage was a fixed template — `Exec=<AppRun>`,
+  `Categories=Utility;` — that threw away the app's own `.desktop` file. The
+  `%F`/`%U` field code went with it, so a file manager's double-click started the
+  app with no argument at all, and `MimeType` went too, so the app was not
+  offered for its file types in the first place. The written entry now carries
+  the shipped entry's field codes, `MimeType`, `Categories`, `GenericName`,
+  `Comment`, `Keywords`, `StartupWMClass` and `StartupNotify`. Reinstall or
+  update an app to rewrite its entry.
+
 ## 0.1.17 — 2026-08-04
 
 - **Fix: a second click on Update killed the download the first click had
