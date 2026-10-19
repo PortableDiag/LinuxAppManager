@@ -145,7 +145,7 @@ finished `.AppImage` lands back in `dist/`.)
 
 ## Roadmap
 
-Shipped through **v0.1.17**: GitHub / URL / local sources; all four backends
+Shipped through **v0.1.18**: GitHub / URL / local sources; all four backends
 (`deb`, `appimage`, `bin`, `tar`); installed-vs-latest list; install / update /
 open / remove / reinstall; refresh; per-app detail view (release notes, download
 size, source, kind); follow-a-GitHub-user as a standing subscription;
@@ -153,7 +153,9 @@ import/export and the curated official list; background update checks via a
 systemd user timer; in-app self-update; a headless CLI (`--list`, `--install`,
 `--install-self`, `--auto-update`, `--follow-user`, `--discover`,
 `--import-official`, `--import`, `--export`); and a visible, non-overlapping
-install — a download shows progress, and one app runs one action at a time.
+install — a download shows progress, and one app runs one action at a time; and
+menu entries that keep an unpacked AppImage's own `Exec` field codes and
+`MimeType`, so "Open with" passes the file.
 
 Next: search / sort / filter chips, Update-all, Flatpak passthrough, themes.
 

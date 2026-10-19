@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Docs: the README roadmap stopped at v0.1.17.** 0.1.18 shipped on
+  2026-10-13 without moving it, so "Shipped through" named the previous release
+  and omitted the menu-entry fix ("Open with" passing the file, `MimeType`
+  carried over). The roadmap now reads through v0.1.18. "Next" is unchanged —
+  search/sort/filter chips, Update-all, Flatpak passthrough and themes are all
+  still unbuilt (checked against the source, not assumed).
+
+  Documentation only, and deliberately untagged: the binary is unchanged, and a
+  release with an identical binary would push a pointless "update available" to
+  every install, App Manager's own entry included.
+
 ## 0.1.18 — 2026-10-13
 
 - **Fix: "Open with" launched an installed app without the file.** The menu
