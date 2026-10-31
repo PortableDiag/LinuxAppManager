@@ -193,13 +193,17 @@ pub fn merge(existing: &[Source], incoming: Vec<Source>) -> (Vec<Source>, usize,
 /// Write a shareable config file: the same `{version, sources}` envelope the
 /// official list uses, so an export can be dropped straight into the repo.
 pub fn export_config(srcs: &[Source], dest: &Path) -> Result<()> {
-    let doc = serde_json::json!({
+    std::fs::write(dest, serde_json::to_string_pretty(&config_doc(srcs))?)?;
+    Ok(())
+}
+
+/// The export document itself, for writing to a file or serving over the API.
+pub fn config_doc(srcs: &[Source]) -> serde_json::Value {
+    serde_json::json!({
         "_comment": "Linux App Manager config. Import via the header ▾ menu. Only 'sources' is read.",
         "version": 1,
         "sources": srcs,
-    });
-    std::fs::write(dest, serde_json::to_string_pretty(&doc)?)?;
-    Ok(())
+    })
 }
 
 /// The manager ships in its own list, exactly like the Android App Manager.
@@ -231,4 +235,41 @@ pub fn set_auto_update(id: &str, on: bool) -> Result<()> {
         s.auto_update = on;
     }
     save_sources(&srcs)
+}
+
+/// App-level settings (not the source list). Today that is only the local API,
+/// which is off until the user turns it on.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    #[serde(default)]
+    pub api_enabled: bool,
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
+}
+
+fn default_api_port() -> u16 {
+    crate::api::DEFAULT_PORT
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { api_enabled: false, api_port: default_api_port() }
+    }
+}
+
+fn settings_path() -> PathBuf {
+    config_dir().join("settings.json")
+}
+
+pub fn load_settings() -> Settings {
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_settings(s: &Settings) -> Result<()> {
+    std::fs::create_dir_all(config_dir())?;
+    std::fs::write(settings_path(), serde_json::to_string_pretty(s)?)?;
+    Ok(())
 }

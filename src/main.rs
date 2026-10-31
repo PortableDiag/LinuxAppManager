@@ -4,6 +4,7 @@
 //! sources from GitHub releases / direct URLs / local folders. It manages
 //! itself, exactly like the Android App Manager it's modelled on.
 
+mod api;
 mod backends;
 mod catalog;
 mod config;
@@ -12,12 +13,14 @@ mod sources;
 
 // adw's prelude re-exports gtk's, so we don't import gtk::prelude separately.
 use adw::prelude::*;
+use api::{ApiRequest, ApiResponse};
 use catalog::{Entry, Status};
 use model::{Kind, Origin, Source};
 use gtk::{gio, glib};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use serde_json::{json, Value};
 
 const APP_ID: &str = "com.procomputation.LinuxAppManager";
 
@@ -37,6 +40,10 @@ struct Ui {
     /// rebuilds the row with a fresh, sensitive one. Tracking the id instead of
     /// the widget survives all of that.
     inflight: RefCell<HashSet<String>>,
+    /// The running local API, if it is switched on. Dropping it stops it.
+    api: RefCell<Option<api::Server>>,
+    api_tx: async_channel::Sender<ApiRequest>,
+    api_key: RefCell<String>,
 }
 
 fn main() -> glib::ExitCode {
@@ -92,6 +99,18 @@ fn run_cli() -> Option<glib::ExitCode> {
                 glib::ExitCode::FAILURE
             }
         }
+        // The key is needed to call the API at all, and asking the API for it
+        // is not a plan, so the CLI prints it (creating it on first use).
+        "--api-key" => match api::load_or_create_key() {
+            Some(key) => {
+                println!("{key}");
+                glib::ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!("could not read or create the API key file");
+                glib::ExitCode::FAILURE
+            }
+        },
         "--install-self" => match backends::install_self() {
             Ok(path) => {
                 println!("Installed App Manager to {}", path.display());
@@ -254,11 +273,19 @@ fn print_usage() {
          linux-app-manager --import-official   merge the repo's official list\n  \
          linux-app-manager --import <file>     merge a config/sources file\n  \
          linux-app-manager --export <file>     write your list as a shareable config\n  \
+         linux-app-manager --api-key       print the local API key\n  \
          linux-app-manager --help          show this help"
     );
 }
 
 fn build_ui(app: &adw::Application) {
+    // A second launch activates the running instance. Building a second window
+    // would also start a second refresh + auto-update pass and try to bind the
+    // API port again, so bring the existing window forward instead.
+    if let Some(win) = app.active_window() {
+        win.present();
+        return;
+    }
     // Use the app-id icon (installed under hicolor/scalable/apps) for windows.
     gtk::Window::set_default_icon_name(APP_ID);
 
@@ -321,6 +348,7 @@ fn build_ui(app: &adw::Application) {
         .content(&toasts)
         .build();
 
+    let (api_tx, api_rx) = async_channel::unbounded::<ApiRequest>();
     let ui = Rc::new(Ui {
         window: window.clone(),
         list,
@@ -329,6 +357,9 @@ fn build_ui(app: &adw::Application) {
         entries: RefCell::new(Vec::new()),
         busy: RefCell::new(false),
         inflight: RefCell::new(HashSet::new()),
+        api: RefCell::new(None),
+        api_tx,
+        api_key: RefCell::new(api::load_or_create_key().unwrap_or_default()),
     });
 
     let ui_btn = ui.clone();
@@ -355,6 +386,13 @@ fn build_ui(app: &adw::Application) {
     });
 
     window.present();
+    let settings = config::load_settings();
+    if settings.api_enabled {
+        if let Err(e) = rebind_api(&ui, settings.api_port) {
+            toast(&ui, &format!("Local API could not listen on port {}: {e}", settings.api_port));
+        }
+    }
+    serve_api(&ui, api_rx);
     refresh(ui.clone());
     discover_follows(ui.clone());
     run_auto_update(ui);
@@ -417,11 +455,12 @@ fn import_export_menu(ui: &Rc<Ui>) -> gtk::Popover {
     vbox.set_margin_start(6);
     vbox.set_margin_end(6);
 
-    let items: [(&str, fn(Rc<Ui>)); 4] = [
+    let items: [(&str, fn(Rc<Ui>)); 5] = [
         ("Follow GitHub user…", follow_user_dialog),
         ("Import official list", import_official),
         ("Import from file…", import_file),
         ("Export config…", export_file),
+        ("Local API…", api_dialog),
     ];
     for (label, action) in items {
         let btn = gtk::Button::builder()
@@ -629,20 +668,23 @@ fn self_install_label() -> Option<&'static str> {
 
 /// Install the running copy (AppImage or loose binary) off-thread.
 fn do_self_install(ui: Rc<Ui>) {
-    let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
-        let _ = tx.send_blocking(backends::install_self());
-    });
-    glib::spawn_future_local(async move {
-        match rx.recv().await {
-            Ok(Ok(path)) => {
-                toast(&ui, &format!("Installed to {} — launch it from your app menu", path.display()));
-                refresh(ui);
-            }
-            Ok(Err(e)) => toast(&ui, &format!("Install failed: {e}")),
-            Err(_) => {}
+    glib::spawn_future_local(perform_self_install(ui));
+}
+
+/// The self-install itself; the API awaits the outcome, a click ignores it.
+async fn perform_self_install(ui: Rc<Ui>) -> Result<String, String> {
+    match background(backends::install_self).await {
+        Some(Ok(path)) => {
+            toast(&ui, &format!("Installed to {} — launch it from your app menu", path.display()));
+            refresh(ui);
+            Ok(path.display().to_string())
         }
-    });
+        Some(Err(e)) => {
+            toast(&ui, &format!("Install failed: {e}"));
+            Err(e.to_string())
+        }
+        None => Err("the install was interrupted".into()),
+    }
 }
 
 // --- detail page -----------------------------------------------------------
@@ -885,9 +927,26 @@ fn grey_while_inflight(btn: &gtk::Button, ui: &Rc<Ui>, id: &str) {
 
 /// Run a backend action off-thread, then refresh (Open is fire-and-forget).
 fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
+    glib::spawn_future_local(async move {
+        let _ = perform(ui, entry, action).await;
+    });
+}
+
+/// Why an action did not happen: `busy` when the app already has one running
+/// (the API answers 409 for that), otherwise it was tried and failed.
+struct ActionError {
+    busy: bool,
+    message: String,
+}
+
+/// The action behind every Install/Update/Reinstall/Uninstall/Open — a click
+/// and an API call both land here, so they share the one-per-app guard, the
+/// progress toast and the refresh. Resolves to the success message.
+async fn perform(ui: Rc<Ui>, entry: Entry, action: Action) -> Result<String, ActionError> {
     if let Action::Open = action {
-        let _ = backends::open(&entry.source);
-        return;
+        return backends::open(&entry.source)
+            .map(|()| format!("Opened {}", entry.source.name))
+            .map_err(|e| ActionError { busy: false, message: e.to_string() });
     }
 
     // One action per app at a time. Without this a second click starts a second
@@ -896,11 +955,9 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
     // already working is the one that dies.
     let id = entry.source.id.clone();
     if !ui.inflight.borrow_mut().insert(id.clone()) {
-        toast(
-            &ui,
-            &format!("{} is already working — hang on", entry.source.name),
-        );
-        return;
+        let message = format!("{} is already working — hang on", entry.source.name);
+        toast(&ui, &message);
+        return Err(ActionError { busy: true, message });
     }
 
     // A terminal app has nothing to click afterwards — tell the user how to
@@ -949,25 +1006,35 @@ fn do_action(ui: Rc<Ui>, entry: Entry, action: Action) {
         let _ = tx.send_blocking(res);
     });
 
-    glib::spawn_future_local(async move {
-        let outcome = rx.recv().await;
-        progress.dismiss();
-        ui.inflight.borrow_mut().remove(&id);
-        match outcome {
-            Ok(Err(e)) => toast(&ui, &format!("Failed: {e}")),
-            Ok(Ok(())) => match cli_hint {
-                Some(pkg) => toast(
-                    &ui,
-                    &format!("Installed. '{pkg}' is a terminal app — open a NEW terminal and run: {pkg}"),
-                ),
-                None => toast(&ui, &format!("{done} {name}")),
-            },
-            // The worker thread died without reporting (dropped sender) — never
-            // leave the click with no feedback at all.
-            Err(_) => toast(&ui, "Action interrupted — please try again"),
-        }
-        refresh(ui);
+    let outcome = rx.recv().await;
+    progress.dismiss();
+    ui.inflight.borrow_mut().remove(&id);
+    let result = match outcome {
+        Ok(Err(e)) => Err(ActionError { busy: false, message: format!("Failed: {e}") }),
+        Ok(Ok(())) => Ok(match cli_hint {
+            Some(pkg) => format!("Installed. '{pkg}' is a terminal app — open a NEW terminal and run: {pkg}"),
+            None => format!("{done} {name}"),
+        }),
+        // The worker thread died without reporting (dropped sender) — never
+        // leave the click with no feedback at all.
+        Err(_) => Err(ActionError { busy: false, message: "Action interrupted — please try again".into() }),
+    };
+    match &result {
+        Ok(m) => toast(&ui, m),
+        Err(e) => toast(&ui, &e.message),
+    }
+    refresh(ui);
+    result
+}
+
+/// Run blocking work (network, dpkg, disk) on a worker thread and await it from
+/// the main loop. `None` only if the worker died without answering.
+async fn background<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(f());
     });
+    rx.recv().await.ok()
 }
 
 // --- small UI helpers ------------------------------------------------------
@@ -1296,4 +1363,592 @@ fn slug(s: &str) -> String {
         });
     }
     out.trim_matches('-').to_string()
+}
+
+// --- local API -------------------------------------------------------------
+
+/// ▾ menu → Local API: the switch, the port and the key. The key is shown and
+/// editable — a key the user cannot read is one they cannot hand to the thing
+/// that needs it — and can be replaced with their own or regenerated.
+fn api_dialog(ui: Rc<Ui>) {
+    let settings = config::load_settings();
+    let dialog = adw::PreferencesDialog::builder().title("Local API").build();
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::builder()
+        .description(
+            "Lets other programs on this computer do anything you can do here: \
+             list, install, update, remove and open apps, and manage your list. \
+             Loopback only (127.0.0.1); every request needs the key.",
+        )
+        .build();
+
+    let switch = adw::SwitchRow::builder()
+        .title("Enable local API")
+        .subtitle(api_hint(ui.api.borrow().as_ref().map(|s| s.port())))
+        .active(settings.api_enabled)
+        .build();
+    let port = adw::SpinRow::with_range(1024.0, 65535.0, 1.0);
+    port.set_title("Port");
+    port.set_value(settings.api_port as f64);
+
+    let key = adw::EntryRow::builder()
+        .title("API key (edit and press ✓ to use your own)")
+        .show_apply_button(true)
+        .build();
+    key.set_text(&ui.api_key.borrow());
+    let copy = gtk::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text("Copy the key")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    let regen = gtk::Button::builder()
+        .icon_name("view-refresh-symbolic")
+        .tooltip_text("Issue a new random key — anything using the old one stops working")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    key.add_suffix(&copy);
+    key.add_suffix(&regen);
+
+    copy.connect_clicked({
+        let key = key.clone();
+        let ui = ui.clone();
+        move |_| {
+            key.clipboard().set_text(&key.text());
+            toast(&ui, "API key copied");
+        }
+    });
+    regen.connect_clicked({
+        let (ui, key, switch) = (ui.clone(), key.clone(), switch.clone());
+        move |_| match api::regenerate_key() {
+            Some(k) => {
+                key.set_text(&k);
+                apply_new_key(&ui, k, &switch);
+            }
+            None => toast(&ui, "Could not write the key file"),
+        }
+    });
+    key.connect_apply({
+        let (ui, switch) = (ui.clone(), switch.clone());
+        move |row| match api::set_key(&row.text()) {
+            Ok(k) => apply_new_key(&ui, k, &switch),
+            Err(e) => {
+                toast(&ui, &format!("Key not changed: {e}"));
+                row.set_text(&ui.api_key.borrow());
+            }
+        }
+    });
+    switch.connect_active_notify({
+        let (ui, port) = (ui.clone(), port.clone());
+        move |sw| {
+            let p = port.value() as u16;
+            set_api(&ui, sw.is_active(), p);
+            sw.set_subtitle(&api_hint(ui.api.borrow().as_ref().map(|s| s.port())));
+        }
+    });
+    port.connect_value_notify({
+        let (ui, switch) = (ui.clone(), switch.clone());
+        move |port| {
+            let p = port.value() as u16;
+            set_api(&ui, switch.is_active(), p);
+            switch.set_subtitle(&api_hint(ui.api.borrow().as_ref().map(|s| s.port())));
+        }
+    });
+
+    group.add(&switch);
+    group.add(&port);
+    group.add(&key);
+    page.add(&group);
+    dialog.add(&page);
+    dialog.present(Some(&ui.window));
+}
+
+fn api_hint(port: Option<u16>) -> String {
+    match port {
+        Some(p) => format!("Listening on http://127.0.0.1:{p}/api — see GET /api/docs"),
+        None => "Off — nothing is listening".to_string(),
+    }
+}
+
+/// The running server captured the old key, so it has to come back up on the
+/// new one or the key on screen would be a lie.
+fn apply_new_key(ui: &Rc<Ui>, key: String, switch: &adw::SwitchRow) {
+    *ui.api_key.borrow_mut() = key;
+    let running = ui.api.borrow().as_ref().map(|s| s.port());
+    if let Some(port) = running {
+        if let Err(e) = rebind_api(ui, port) {
+            toast(ui, &format!("Local API could not restart on port {port}: {e}"));
+        }
+    }
+    switch.set_subtitle(&api_hint(ui.api.borrow().as_ref().map(|s| s.port())));
+    toast(ui, "API key changed — the old key no longer works");
+}
+
+/// Switch the API on (on `port`) or off, and remember the choice. A failure to
+/// listen is said out loud: a silently dead API wastes an afternoon.
+fn set_api(ui: &Rc<Ui>, on: bool, port: u16) {
+    if on {
+        if let Err(e) = rebind_api(ui, port) {
+            toast(ui, &format!("Local API could not listen on port {port}: {e}"));
+        }
+    } else {
+        // Dropping the Server is what stops the listener.
+        *ui.api.borrow_mut() = None;
+    }
+    if let Err(e) = config::save_settings(&config::Settings { api_enabled: on, api_port: port }) {
+        toast(ui, &format!("Save failed: {e}"));
+    }
+}
+
+/// (Re)start the listener on `port` with the current key. On a new port the
+/// new listener is bound *before* the old one is dropped, so a port that turns
+/// out to be taken leaves the API up where it was instead of leaving it dead.
+/// On the same port the old one has to go first — two cannot hold it.
+fn rebind_api(ui: &Rc<Ui>, port: u16) -> std::io::Result<()> {
+    if ui.api.borrow().as_ref().map(|s| s.port()) == Some(port) {
+        *ui.api.borrow_mut() = None;
+    }
+    let server = api::start(port, ui.api_key.borrow().clone(), ui.api_tx.clone())?;
+    *ui.api.borrow_mut() = Some(server);
+    Ok(())
+}
+
+/// Answer API requests on the main loop. Each request gets its own task, so a
+/// five-minute install does not hold up a status call behind it.
+fn serve_api(ui: &Rc<Ui>, rx: async_channel::Receiver<ApiRequest>) {
+    let ui = ui.clone();
+    glib::spawn_future_local(async move {
+        while let Ok(request) = rx.recv().await {
+            let ui = ui.clone();
+            glib::spawn_future_local(async move {
+                let response = dispatch(ui, &request).await;
+                // A send error only means the caller gave up first.
+                let _ = request.reply.send(response).await;
+            });
+        }
+    });
+}
+
+fn status_key(s: Status) -> &'static str {
+    match s {
+        Status::NotInstalled => "not_installed",
+        Status::UpToDate => "up_to_date",
+        Status::UpdateAvailable => "update_available",
+        Status::Unknown => "unknown",
+    }
+}
+
+fn entry_json(ui: &Rc<Ui>, e: &Entry) -> Value {
+    let src = &e.source;
+    json!({
+        "id": src.id,
+        "name": src.name,
+        "description": src.description,
+        "kind": src.kind,
+        "status": status_key(e.status()),
+        "summary": e.subtitle(),
+        "installed": e.installed,
+        "latest": e.latest.as_ref().map(|l| l.version.clone()),
+        "download_size": e.latest.as_ref().and_then(|l| l.size),
+        "release_notes": e.latest.as_ref().and_then(|l| l.notes.clone()),
+        "installable": e.installable(),
+        "auto_update": src.auto_update,
+        "cli": src.cli,
+        "origin": src.origin,
+        "package": src.package,
+        "install_path": src.install_path,
+        "busy": ui.inflight.borrow().contains(&src.id),
+        "is_self": src.id == APP_ID,
+    })
+}
+
+/// One source, resolved fresh: latest release + what's installed. Unlike
+/// `catalog::build` it never writes the source list, so it is safe to call on
+/// a single entry (build would persist a one-entry list after a kind heal).
+fn resolve_entry(src: Source) -> Entry {
+    let (latest, corrected) = sources::resolve_latest(&src);
+    let mut source = src;
+    if let Some(kind) = corrected {
+        source.kind = kind;
+    }
+    Entry { installed: backends::detect_installed(&source), source, latest }
+}
+
+/// A source by id, or failing that by display name (both case-insensitive).
+fn find_source(needle: &str) -> Option<Source> {
+    let srcs = config::load_sources().unwrap_or_default();
+    srcs.iter()
+        .find(|s| s.id.eq_ignore_ascii_case(needle))
+        .or_else(|| srcs.iter().find(|s| s.name.eq_ignore_ascii_case(needle)))
+        .cloned()
+}
+
+fn no_app(needle: &str) -> ApiResponse {
+    ApiResponse::error(404, &format!("no app matching '{needle}' — GET /api/apps lists them"))
+}
+
+/// Merge into the saved list and refresh the window — the API's apply_import.
+fn merge_and_save(ui: &Rc<Ui>, incoming: Vec<Source>) -> ApiResponse {
+    let existing = config::load_sources().unwrap_or_default();
+    let (merged, added, updated) = config::merge(&existing, incoming);
+    match config::save_sources(&merged) {
+        Ok(()) => {
+            refresh(ui.clone());
+            ApiResponse::ok(json!({ "ok": true, "added": added, "updated": updated, "total": merged.len() }))
+        }
+        Err(e) => ApiResponse::error(500, &format!("save failed: {e}")),
+    }
+}
+
+fn index() -> Value {
+    json!({
+        "ok": true,
+        "name": "linux-app-manager",
+        "version": env!("CARGO_PKG_VERSION"),
+        "endpoints": {
+            "GET    /api/docs": "the full reference, as Markdown — ?section= narrows it",
+            "GET    /api/status": "version, running copy, actions in flight, API port",
+            "GET    /api/apps": "every app: installed vs latest (hits GitHub — a few seconds)",
+            "POST   /api/apps": "{repo} quick-add a GitHub repo/URL, or {source: {...}} a full entry",
+            "GET    /api/apps/{id}": "one app (id or name)",
+            "PATCH  /api/apps/{id}": "{name?, description?, kind?, package?, install_path?, repo?, url?, path?, auto_update?, cli?}",
+            "DELETE /api/apps/{id}": "remove from the list (does not uninstall)",
+            "POST   /api/apps/{id}/install": "install — waits until done",
+            "POST   /api/apps/{id}/update": "update — waits until done",
+            "POST   /api/apps/{id}/reinstall": "download and install the latest again",
+            "POST   /api/apps/{id}/uninstall": "remove the installed app from this machine",
+            "POST   /api/apps/{id}/open": "launch it",
+            "POST   /api/apps/{id}/auto-update": "{on: bool}",
+            "GET    /api/sources": "the raw saved list",
+            "GET    /api/follows": "followed GitHub users",
+            "POST   /api/follow": "{user} — follow and add their installable repos",
+            "POST   /api/discover": "re-scan followed users for new repos",
+            "POST   /api/import-official": "merge the curated official list",
+            "POST   /api/import": "{config: <document or JSON text>} or {path}",
+            "GET    /api/export": "your list as a shareable config document",
+            "POST   /api/export": "{path} — write it to a file",
+            "POST   /api/self-install": "install this running copy (as the Install button on App Manager's row)",
+            "POST   /api/auto-update": "run the auto-update pass now",
+            "POST   /api/refresh": "reload the window's list",
+            "GET    /api/settings": "API settings",
+            "POST   /api/settings": "{api_enabled?, api_port?, api_key?, regenerate_key?}",
+        }
+    })
+}
+
+async fn dispatch(ui: Rc<Ui>, req: &ApiRequest) -> ApiResponse {
+    let segs: Vec<String> = req
+        .path
+        .strip_prefix("/api")
+        .unwrap_or(&req.path)
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(api::percent_decode)
+        .collect();
+    let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
+
+    match (req.method.as_str(), segs.as_slice()) {
+        ("GET", []) => ApiResponse::ok(index()),
+        ("GET", ["docs"]) => match req.string("section") {
+            None => ApiResponse::text("text/markdown; charset=utf-8", api::REFERENCE.to_string()),
+            Some(name) => match api::reference_section(&name) {
+                Some(text) => ApiResponse::text("text/markdown; charset=utf-8", text),
+                None => ApiResponse {
+                    status: 404,
+                    body: json!({ "ok": false, "error": format!("no section matching '{name}'"),
+                                  "sections": api::reference_sections() }),
+                    raw: None,
+                },
+            },
+        },
+        ("GET", ["status"]) => {
+            let mut inflight: Vec<String> = ui.inflight.borrow().iter().cloned().collect();
+            inflight.sort();
+            ApiResponse::ok(json!({
+                "ok": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "running_from": std::env::current_exe().ok().map(|p| p.display().to_string()),
+                "running_appimage": backends::running_appimage().map(|p| p.display().to_string()),
+                "self_install_offered": self_install_label(),
+                "in_flight": inflight,
+                "refreshing": *ui.busy.borrow(),
+                "api_port": ui.api.borrow().as_ref().map(|s| s.port()),
+                "config_dir": config::config_dir().display().to_string(),
+            }))
+        }
+
+        ("GET", ["apps"]) => {
+            let srcs = config::load_sources().unwrap_or_default();
+            let Some(entries) = background(move || srcs.into_iter().map(resolve_entry).collect::<Vec<_>>()).await
+            else {
+                return ApiResponse::error(500, "the catalog lookup died");
+            };
+            let apps: Vec<Value> = entries.iter().map(|e| entry_json(&ui, e)).collect();
+            ApiResponse::ok(json!({ "ok": true, "apps": apps }))
+        }
+        ("POST", ["apps"]) => {
+            if let Some(src) = req.body.get("source") {
+                return match serde_json::from_value::<Source>(src.clone()) {
+                    Ok(src) => merge_and_save(&ui, vec![src]),
+                    Err(e) => ApiResponse::error(400, &format!("not a valid source: {e}")),
+                };
+            }
+            let Some(input) = req.string("repo").or_else(|| req.string("url")) else {
+                return ApiResponse::error(400, "send {repo: \"owner/repo or URL\"} or {source: {...}}");
+            };
+            match background(move || sources::resolve_repo(&input)).await {
+                Some(Ok(src)) => {
+                    let added = json!(src);
+                    let mut resp = merge_and_save(&ui, vec![src]);
+                    if resp.status == 200 {
+                        resp.body["source"] = added;
+                    }
+                    resp
+                }
+                Some(Err(e)) => ApiResponse::error(422, &format!("couldn't add: {e}")),
+                None => ApiResponse::error(500, "the lookup died"),
+            }
+        }
+        ("GET", ["apps", id]) => {
+            let Some(src) = find_source(id) else { return no_app(id) };
+            match background(move || resolve_entry(src)).await {
+                Some(e) => ApiResponse::ok(json!({ "ok": true, "app": entry_json(&ui, &e) })),
+                None => ApiResponse::error(500, "the lookup died"),
+            }
+        }
+        ("PATCH", ["apps", id]) => edit_source(&ui, id, req),
+        ("DELETE", ["apps", id]) => {
+            let Some(src) = find_source(id) else { return no_app(id) };
+            match config::remove_source(&src.id) {
+                Ok(()) => {
+                    refresh(ui.clone());
+                    ApiResponse::ok(json!({ "ok": true, "removed": src.id }))
+                }
+                Err(e) => ApiResponse::error(500, &format!("save failed: {e}")),
+            }
+        }
+        ("POST", ["apps", id, "auto-update"]) => {
+            let Some(src) = find_source(id) else { return no_app(id) };
+            let Some(on) = req.bool("on") else {
+                return ApiResponse::error(400, "send {on: true|false}");
+            };
+            match config::set_auto_update(&src.id, on) {
+                Ok(()) => {
+                    refresh(ui.clone());
+                    ApiResponse::ok(json!({ "ok": true, "id": src.id, "auto_update": on }))
+                }
+                Err(e) => ApiResponse::error(500, &format!("save failed: {e}")),
+            }
+        }
+        ("POST", ["apps", id, verb]) => {
+            let action = match *verb {
+                "install" => Action::Install,
+                "update" | "reinstall" => Action::Update,
+                "uninstall" | "remove" => Action::Remove,
+                "open" => Action::Open,
+                other => return ApiResponse::error(404, &format!("no action '{other}' — see GET /api")),
+            };
+            let Some(src) = find_source(id) else { return no_app(id) };
+            let Some(entry) = background(move || resolve_entry(src)).await else {
+                return ApiResponse::error(500, "the lookup died");
+            };
+            if matches!(action, Action::Install | Action::Update) && !entry.installable() {
+                return ApiResponse::error(
+                    422,
+                    &format!(
+                        "{}: no downloadable release asset for this machine (GitHub unreachable, \
+                         rate-limited, or the release has no matching file)",
+                        entry.source.name
+                    ),
+                );
+            }
+            let id = entry.source.id.clone();
+            match perform(ui.clone(), entry, action).await {
+                Ok(message) => ApiResponse::ok(json!({ "ok": true, "id": id, "message": message })),
+                Err(e) => ApiResponse::error(if e.busy { 409 } else { 500 }, &e.message),
+            }
+        }
+
+        ("GET", ["sources"]) => ApiResponse::ok(json!({ "ok": true, "sources": config::load_sources().unwrap_or_default() })),
+        ("GET", ["follows"]) => ApiResponse::ok(json!({ "ok": true, "follows": config::load_follows() })),
+        ("POST", ["follow"]) => {
+            let Some(user) = req.string("user").map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) else {
+                return ApiResponse::error(400, "send {user: \"github-username\"}");
+            };
+            let _ = config::add_follow(&user);
+            match background(move || sources::follow_user(&user)).await {
+                Some(Ok(list)) => merge_and_save(&ui, list),
+                Some(Err(e)) => ApiResponse::error(502, &format!("follow failed: {e}")),
+                None => ApiResponse::error(500, "the lookup died"),
+            }
+        }
+        ("POST", ["discover"]) => {
+            let follows = config::load_follows();
+            match background(move || sources::discover_follows(&follows)).await {
+                Some(found) => merge_and_save(&ui, found),
+                None => ApiResponse::error(500, "the lookup died"),
+            }
+        }
+        ("POST", ["import-official"]) => match background(sources::import_official).await {
+            Some(Ok(list)) => merge_and_save(&ui, list),
+            Some(Err(e)) => ApiResponse::error(502, &format!("import failed: {e}")),
+            None => ApiResponse::error(500, "the lookup died"),
+        },
+        ("POST", ["import"]) => {
+            let text = match (req.body.get("config"), req.string("path")) {
+                (Some(Value::String(t)), _) => Ok(t.clone()),
+                (Some(doc), _) => Ok(doc.to_string()),
+                (None, Some(path)) => std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}")),
+                (None, None) => Err("send {config: <document>} or {path: \"/file.json\"}".to_string()),
+            };
+            match text.map(|t| sources::parse_config(&t).map_err(|e| format!("bad config: {e}"))) {
+                Ok(Ok(list)) => merge_and_save(&ui, list),
+                Ok(Err(e)) | Err(e) => ApiResponse::error(400, &e),
+            }
+        }
+        ("GET", ["export"]) => ApiResponse::ok(config::config_doc(&config::load_sources().unwrap_or_default())),
+        ("POST", ["export"]) => {
+            let Some(path) = req.string("path") else {
+                return ApiResponse::error(400, "send {path: \"/file.json\"} — or GET /api/export for the document");
+            };
+            let srcs = config::load_sources().unwrap_or_default();
+            match config::export_config(&srcs, std::path::Path::new(&path)) {
+                Ok(()) => ApiResponse::ok(json!({ "ok": true, "path": path, "sources": srcs.len() })),
+                Err(e) => ApiResponse::error(500, &format!("export failed: {e}")),
+            }
+        }
+        ("POST", ["self-install"]) => match perform_self_install(ui.clone()).await {
+            Ok(path) => ApiResponse::ok(json!({ "ok": true, "installed_to": path })),
+            Err(e) => ApiResponse::error(500, &e),
+        },
+        ("POST", ["auto-update"]) => {
+            let srcs = config::load_sources().unwrap_or_default();
+            match background(move || catalog::auto_update(&srcs)).await {
+                Some(r) => {
+                    refresh(ui.clone());
+                    let failed: Vec<Value> = r.failed.iter().map(|(n, e)| json!({ "name": n, "error": e })).collect();
+                    ApiResponse::ok(json!({ "ok": r.failed.is_empty(), "updated": r.updated, "failed": failed }))
+                }
+                None => ApiResponse::error(500, "the auto-update pass died"),
+            }
+        }
+        ("POST", ["refresh"]) => {
+            refresh(ui.clone());
+            ApiResponse::ok(json!({ "ok": true }))
+        }
+
+        ("GET", ["settings"]) => {
+            let s = config::load_settings();
+            ApiResponse::ok(json!({ "ok": true, "api_enabled": s.api_enabled, "api_port": s.api_port,
+                                    "listening_on": ui.api.borrow().as_ref().map(|s| s.port()) }))
+        }
+        ("POST", ["settings"]) => api_settings(&ui, req),
+
+        (_, []) | (_, ["docs" | "status" | "apps" | "sources" | "follows" | "follow" | "discover"
+            | "import-official" | "import" | "export" | "self-install" | "auto-update" | "refresh"
+            | "settings", ..]) => ApiResponse::error(405, &format!("{} is not supported on {}", req.method, req.path)),
+        _ => ApiResponse::error(404, &format!("no route {} {} — GET /api lists them", req.method, req.path)),
+    }
+}
+
+/// PATCH /api/apps/{id}: the Edit… dialog, field by field. The id stays put —
+/// it names the install on disk.
+fn edit_source(ui: &Rc<Ui>, needle: &str, req: &ApiRequest) -> ApiResponse {
+    let Some(found) = find_source(needle) else { return no_app(needle) };
+    let mut srcs = config::load_sources().unwrap_or_default();
+    let Some(src) = srcs.iter_mut().find(|s| s.id == found.id) else { return no_app(needle) };
+
+    if let Some(v) = req.string("name") {
+        src.name = v;
+    }
+    if req.body.get("description").is_some() {
+        src.description = req.string("description").filter(|d| !d.trim().is_empty());
+    }
+    if let Some(k) = req.body.get("kind") {
+        match serde_json::from_value::<Kind>(k.clone()) {
+            Ok(k) => src.kind = k,
+            Err(_) => return ApiResponse::error(400, "kind must be bin, appimage, deb or tar"),
+        }
+    }
+    if req.body.get("package").is_some() {
+        src.package = req.string("package").filter(|p| !p.trim().is_empty());
+    }
+    if req.body.get("install_path").is_some() {
+        src.install_path = req.string("install_path").filter(|p| !p.trim().is_empty());
+    }
+    if let Some(repo) = req.string("repo") {
+        src.origin = Origin::Github { repo: normalize_repo(&repo) };
+    } else if let Some(url) = req.string("url") {
+        src.origin = Origin::Url { url };
+    } else if let Some(path) = req.string("path") {
+        src.origin = Origin::Local { path };
+    }
+    if let Some(b) = req.bool("auto_update") {
+        src.auto_update = b;
+    }
+    if let Some(b) = req.bool("cli") {
+        src.cli = b;
+    }
+    let edited = json!(src);
+    match config::save_sources(&srcs) {
+        Ok(()) => {
+            refresh(ui.clone());
+            ApiResponse::ok(json!({ "ok": true, "source": edited }))
+        }
+        Err(e) => ApiResponse::error(500, &format!("save failed: {e}")),
+    }
+}
+
+/// POST /api/settings. The reply to this request still goes out on the old
+/// connection, so changing the key or port here is safe — the *next* call has
+/// to use the new one.
+fn api_settings(ui: &Rc<Ui>, req: &ApiRequest) -> ApiResponse {
+    let mut s = config::load_settings();
+    let mut key_changed = false;
+    if req.bool("regenerate_key") == Some(true) {
+        match api::regenerate_key() {
+            Some(k) => *ui.api_key.borrow_mut() = k,
+            None => return ApiResponse::error(500, "could not write the key file"),
+        }
+        key_changed = true;
+    } else if let Some(k) = req.string("api_key") {
+        match api::set_key(&k) {
+            Ok(k) => *ui.api_key.borrow_mut() = k,
+            Err(e) => return ApiResponse::error(400, &e),
+        }
+        key_changed = true;
+    }
+    if let Some(p) = req.u64("api_port") {
+        match u16::try_from(p) {
+            Ok(p) if p >= 1024 => s.api_port = p,
+            _ => return ApiResponse::error(400, "api_port must be 1024–65535"),
+        }
+    }
+    if let Some(on) = req.bool("api_enabled") {
+        s.api_enabled = on;
+    }
+
+    let running = ui.api.borrow().as_ref().map(|s| s.port());
+    if s.api_enabled && (running != Some(s.api_port) || key_changed) {
+        if let Err(e) = rebind_api(ui, s.api_port) {
+            // The key is already on disk, so the listener that stayed up has to
+            // take it too, or the old key would keep working.
+            if let (true, Some(p)) = (key_changed, running) {
+                let _ = rebind_api(ui, p);
+            }
+            let stays = running.map_or("off".to_string(), |p| format!("on port {p}"));
+            return ApiResponse::error(409, &format!("could not listen on port {}: {e} — the API stays {stays}", s.api_port));
+        }
+    } else if !s.api_enabled {
+        *ui.api.borrow_mut() = None;
+    }
+    if let Err(e) = config::save_settings(&s) {
+        return ApiResponse::error(500, &format!("save failed: {e}"));
+    }
+    let mut body = json!({ "ok": true, "api_enabled": s.api_enabled, "api_port": s.api_port });
+    if key_changed {
+        body["api_key"] = json!(ui.api_key.borrow().clone());
+    }
+    ApiResponse::ok(body)
 }

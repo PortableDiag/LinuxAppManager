@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.1.19 — 2026-10-30
+
+- **New: a local API that can do everything the window can.** Off by default;
+  ▾ menu → **Local API…** has the switch, the port (default 8422) and the key.
+  List apps, install / update / reinstall / uninstall / open, add, edit and
+  remove sources, follow users, import and export, self-install, run the
+  auto-update pass, and change the API's own port and key. Loopback only;
+  every request needs the key (`Authorization: Bearer` or `X-API-Key`), compared
+  in constant time. The key lives in `~/.config/linux-app-manager/api-key`
+  (0600); `linux-app-manager --api-key` prints it. The user can type their own
+  key or regenerate one, and the old key stops working immediately. Same design
+  as Gapless's control API. The full reference is `docs/API.md`, compiled in
+  and served at `GET /api/docs`.
+
+  API actions run through the same code path as a click, so they share the
+  one-action-per-app guard (a second install of a busy app gets 409, from either
+  side) and the window shows the same progress toast and refreshes afterwards.
+  A port change binds the new port before releasing the old one, so a taken
+  port leaves the API where it was instead of dead.
+
+- **Fix: launching App Manager while it was already open built a second
+  window** — which also started a second refresh and a second auto-update pass
+  against the same files. A second launch now brings the open window forward.
 
 - **Docs: the README roadmap stopped at v0.1.17.** 0.1.18 shipped on
   2026-10-13 without moving it, so "Shipped through" named the previous release
