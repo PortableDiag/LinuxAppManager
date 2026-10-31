@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Docs: the README described the local API only in the roadmap.** It now has
+  a "Local API" section (turning it on, changing the port and key, two curl
+  examples, a pointer to `docs/API.md`), and the roadmap's CLI list names
+  `--api-key`. Documentation only and untagged on purpose: a release with an
+  identical binary would push a pointless "update available" to every install.
+
 ## 0.1.19 — 2026-10-30
 
 - **New: a local API that can do everything the window can.** Off by default;

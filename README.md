@@ -94,6 +94,26 @@ so it can update itself out of the box.
 Imports **merge by `id`** — incoming entries add or replace, existing ones stay.
 `kind` is one of `bin` / `appimage` / `deb` / `tar`.
 
+### Local API
+
+Off by default. **▾ menu → Local API…** switches it on and sets the port
+(default **8422**) and the key. You can type your own key (16+ characters, then
+✓) or regenerate a random one; either way the old key stops working at once.
+
+It listens on `127.0.0.1` only and can do everything the window can: list apps,
+install / update / reinstall / uninstall / open, add / edit / remove sources,
+follow users, import / export, self-install, and change its own port and key.
+
+```sh
+KEY=$(linux-app-manager --api-key)
+curl -s -H "Authorization: Bearer $KEY" http://127.0.0.1:8422/api/apps
+curl -s -X POST -H "Authorization: Bearer $KEY" http://127.0.0.1:8422/api/apps/Gapless/update
+```
+
+Full reference: [`docs/API.md`](docs/API.md), also served by the running app at
+`GET /api/docs`. The API lives in the window's process — it is up while App
+Manager is open.
+
 ---
 
 ## Build
@@ -152,7 +172,7 @@ size, source, kind); follow-a-GitHub-user as a standing subscription;
 import/export and the curated official list; background update checks via a
 systemd user timer; in-app self-update; a headless CLI (`--list`, `--install`,
 `--install-self`, `--auto-update`, `--follow-user`, `--discover`,
-`--import-official`, `--import`, `--export`); and a visible, non-overlapping
+`--import-official`, `--import`, `--export`, `--api-key`); and a visible, non-overlapping
 install — a download shows progress, and one app runs one action at a time; and
 menu entries that keep an unpacked AppImage's own `Exec` field codes and
 `MimeType`, so "Open with" passes the file; and a local HTTP API (off by
