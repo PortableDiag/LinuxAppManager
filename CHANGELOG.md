@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.1.20 — 2026-11-25
+
+- **New origin: the private update feed.** `{ "type": "appupdates", "slug": "gapless" }`
+  reads `https://updates.procomputation.com/<slug>/latest.json` (AppUpdates) for an app
+  whose GitHub repo went private, so the anonymous GitHub API no longer sees its
+  releases. It takes `version_name`, and the asset for this machine
+  (`appimage-x86_64`, `deb-x86_64`, `tar-x86_64`, `bin-x86_64`). An entry is ignored
+  unless its URL is under that slug's folder on the feed and it carries a SHA-256.
+- **A download is checked against the published SHA-256 and size before anything
+  installs it**, whenever the origin publishes one (the feed always does). A mismatch
+  deletes the file and installs nothing. GitHub, URL and local origins are unchanged.
+- The local API takes `"appupdates": "<slug>"` when adding or editing a source.
+- **Upgrade App Manager before writing an `appupdates` entry**: 0.1.19 and older
+  cannot read the origin and then treat the whole `sources.json` as unreadable.
+
+### Also in 0.1.20
+
 - **Docs: the README described the local API only in the roadmap.** It now has
   a "Local API" section (turning it on, changing the port and key, two curl
   examples, a pointer to `docs/API.md`), and the roadmap's CLI list names

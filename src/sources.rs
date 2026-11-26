@@ -33,10 +33,57 @@ pub fn resolve_latest(src: &Source) -> (Option<Latest>, Option<Kind>) {
                 download_url: url.clone(),
                 size: None,
                 notes: None,
+                sha256: None,
             }),
             None,
         ),
+        Origin::Appupdates { slug } => (appupdates_latest(src, slug).ok().flatten(), None),
     }
+}
+
+/// The private update feed. Its host is fixed here: an entry names only a slug.
+pub const APPUPDATES_FEED: &str = "https://updates.procomputation.com";
+
+fn appupdates_latest(src: &Source, slug: &str) -> Result<Option<Latest>> {
+    let url = format!("{APPUPDATES_FEED}/{slug}/latest.json");
+    let resp = http_agent().get(&url).set("User-Agent", "LinuxAppManager").call()?;
+    let json: serde_json::Value = resp.into_json()?;
+    Ok(parse_appupdates(&json, src.kind, slug, std::env::consts::ARCH))
+}
+
+/// The feed's asset key for this machine: `<kind>-<arch>` (`appimage-x86_64`).
+fn appupdates_key(kind: Kind, arch: &str) -> Option<String> {
+    let k = match kind {
+        Kind::AppImage => "appimage",
+        Kind::Deb => "deb",
+        Kind::Tar => "tar",
+        Kind::Bin => "bin",
+    };
+    Some(format!("{k}-{arch}"))
+}
+
+/// Reads `{"version_name", "assets": {"<kind>-<arch>": {"url", "sha256", "size"}}}`.
+/// Refused (None) unless the URL is under this slug's folder on the feed and a
+/// 64-hex SHA-256 is given: an entry with no checksum is never installed.
+pub fn parse_appupdates(json: &serde_json::Value, kind: Kind, slug: &str, arch: &str) -> Option<Latest> {
+    let version = json["version_name"].as_str()?.trim_start_matches('v').to_string();
+    let key = appupdates_key(kind, arch)?;
+    let a = json["assets"].get(&key)?;
+    let url = a["url"].as_str()?;
+    if !url.starts_with(&format!("{APPUPDATES_FEED}/{slug}/")) {
+        return None;
+    }
+    let sha = a["sha256"].as_str()?;
+    if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(Latest {
+        version,
+        download_url: url.to_string(),
+        size: a["size"].as_u64(),
+        notes: None,
+        sha256: Some(sha.to_ascii_lowercase()),
+    })
 }
 
 fn github_latest(src: &Source, repo: &str) -> Result<(Option<Latest>, Option<Kind>)> {
@@ -99,6 +146,7 @@ fn github_latest(src: &Source, repo: &str) -> Result<(Option<Latest>, Option<Kin
             download_url,
             size,
             notes,
+            sha256: None,
         }),
         corrected,
     ))
@@ -529,6 +577,33 @@ mod tests {
     use super::*;
     use crate::model::{Kind, Origin, Source};
 
+    fn feed(url: &str, sha: &str) -> serde_json::Value {
+        serde_json::json!({"version_code": 8002, "version_name": "0.8.2",
+            "assets": {"appimage-x86_64": {"url": url, "sha256": sha, "size": 5}}})
+    }
+    const SHA: &str = "6f5f63afb3df294936ec166c2b73da5b70d524fb29bda6d9f92d696317525f17";
+
+    #[test]
+    fn appupdates_reads_the_feed() {
+        let l = parse_appupdates(&feed("https://updates.procomputation.com/gapless/Gapless-0.8.2-x86_64.AppImage", SHA),
+            Kind::AppImage, "gapless", "x86_64").unwrap();
+        assert_eq!(l.version, "0.8.2");
+        assert_eq!(l.size, Some(5));
+        assert_eq!(l.sha256.as_deref(), Some(SHA));
+    }
+
+    #[test]
+    fn appupdates_refuses_what_it_cannot_check() {
+        let ok = "https://updates.procomputation.com/gapless/G.AppImage";
+        // another slug's folder, another host, no checksum, a short one, another arch, another kind
+        assert!(parse_appupdates(&feed("https://updates.procomputation.com/other/G.AppImage", SHA), Kind::AppImage, "gapless", "x86_64").is_none());
+        assert!(parse_appupdates(&feed("https://evil.example/gapless/G.AppImage", SHA), Kind::AppImage, "gapless", "x86_64").is_none());
+        assert!(parse_appupdates(&feed(ok, ""), Kind::AppImage, "gapless", "x86_64").is_none());
+        assert!(parse_appupdates(&feed(ok, "abc"), Kind::AppImage, "gapless", "x86_64").is_none());
+        assert!(parse_appupdates(&feed(ok, SHA), Kind::AppImage, "gapless", "aarch64").is_none());
+        assert!(parse_appupdates(&feed(ok, SHA), Kind::Deb, "gapless", "x86_64").is_none());
+    }
+
     #[test]
     fn parses_repo_forms() {
         assert_eq!(parse_repo("owner/repo").as_deref(), Some("owner/repo"));
@@ -638,6 +713,7 @@ fn local_latest(dir: &Path, src: &Source) -> Option<Latest> {
         download_url: format!("file://{}", path.display()),
         size: Some(size),
         notes: None,
+        sha256: None,
     })
 }
 

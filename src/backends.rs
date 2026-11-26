@@ -499,7 +499,32 @@ fn download(src: &Source, latest: &Latest) -> Result<PathBuf> {
 
     let mut out = std::fs::File::create(&dest)?;
     std::io::copy(&mut reader, &mut out)?;
+    drop(out);
+    if let Err(e) = check_download(&dest, latest) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(e);
+    }
     Ok(dest)
+}
+
+/// When the origin published a SHA-256 (the update feed does, always), the file
+/// must match it and its size before anything installs it.
+fn check_download(file: &Path, latest: &Latest) -> Result<()> {
+    let Some(want) = &latest.sha256 else { return Ok(()) };
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(file)?;
+    let mut h = Sha256::new();
+    let n = std::io::copy(&mut f, &mut h)?;
+    if let Some(size) = latest.size {
+        if n != size {
+            return Err(anyhow!("download is {n} bytes, the feed says {size}: not installed"));
+        }
+    }
+    let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if !got.eq_ignore_ascii_case(want) {
+        return Err(anyhow!("download does not match the published SHA-256: not installed"));
+    }
+    Ok(())
 }
 
 fn install_deb(file: &PathBuf) -> Result<()> {
@@ -938,6 +963,21 @@ fn run_pkexec(args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_download_must_match_the_published_sha256_and_size() {
+        let d = std::env::temp_dir().join(format!("lam-check-{}", std::process::id()));
+        std::fs::write(&d, b"hello").unwrap();
+        let mk = |sha: Option<&str>, size| Latest { version: "1".into(), download_url: String::new(), size, notes: None, sha256: sha.map(String::from) };
+        let good = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        assert!(check_download(&d, &mk(Some(good), Some(5))).is_ok());
+        assert!(check_download(&d, &mk(Some(&good.to_uppercase()), None)).is_ok());
+        assert!(check_download(&d, &mk(Some(good), Some(6))).is_err());
+        assert!(check_download(&d, &mk(Some(&"0".repeat(64)), Some(5))).is_err());
+        assert!(check_download(&d, &mk(None, None)).is_ok()); // origins with no checksum: unchanged
+        let _ = std::fs::remove_file(&d);
+    }
     #[test]
     fn shipped_entry_keeps_what_open_with_needs() {
         let e = super::ShippedEntry::parse(

@@ -882,6 +882,7 @@ fn origin_text(o: &Origin) -> String {
         Origin::Github { repo } => format!("github.com/{repo}"),
         Origin::Url { url } => url.clone(),
         Origin::Local { path } => path.clone(),
+        Origin::Appupdates { slug } => format!("{}/{slug}", crate::sources::APPUPDATES_FEED),
     }
 }
 
@@ -1883,6 +1884,8 @@ fn edit_source(ui: &Rc<Ui>, needle: &str, req: &ApiRequest) -> ApiResponse {
         src.origin = Origin::Url { url };
     } else if let Some(path) = req.string("path") {
         src.origin = Origin::Local { path };
+    } else if let Some(slug) = req.string("appupdates") {
+        src.origin = Origin::Appupdates { slug };
     }
     if let Some(b) = req.bool("auto_update") {
         src.auto_update = b;

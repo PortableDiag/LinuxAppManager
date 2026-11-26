@@ -67,6 +67,11 @@ Each source is one app:
 - **`url`** — `{ "type": "url", "url": "http://host/app.deb" }`. A direct download.
 - **`local`** — `{ "type": "local", "path": "/media/.../apks" }`. Highest-versioned
   matching file in a folder wins.
+- **`appupdates`** — `{ "type": "appupdates", "slug": "gapless" }`. The private update
+  feed at `updates.procomputation.com/<slug>/latest.json`, for apps whose GitHub repo is
+  private. The download must match the feed's SHA-256 and size before it is installed.
+  Needs App Manager 0.1.20 or later: older ones cannot read this origin and then see no
+  sources at all.
 
 On first run a default `sources.json` is written that contains **only App Manager itself**,
 so it can update itself out of the box.

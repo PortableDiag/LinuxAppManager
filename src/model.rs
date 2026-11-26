@@ -47,6 +47,9 @@ pub enum Origin {
     Url { url: String },
     /// A local folder holding release files.
     Local { path: String },
+    /// A slug on the private update feed (AppUpdates): `<feed>/<slug>/latest.json`
+    /// names the version, the asset URL and its SHA-256, checked before install.
+    Appupdates { slug: String },
 }
 
 /// One app the manager knows about.
@@ -95,6 +98,8 @@ pub struct Latest {
     pub size: Option<u64>,
     #[allow(dead_code)]
     pub notes: Option<String>,
+    /// SHA-256 (hex) the download must match, when the origin publishes one.
+    pub sha256: Option<String>,
 }
 
 /// Compare two version strings leniently: numeric runs compared as numbers,

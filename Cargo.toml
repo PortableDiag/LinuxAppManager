@@ -1,6 +1,6 @@
 [package]
 name = "linux-app-manager"
-version = "0.1.19"
+version = "0.1.20"
 edition = "2021"
 description = "A private sideload/catalog manager for your own Linux apps"
 license = "MIT"
@@ -23,6 +23,8 @@ serde_json = "1"
 dirs = "5"
 # Blocking HTTP (rustls) — no openssl, no tokio. json feature for into_json().
 ureq = { version = "2", features = ["json"] }
+# SHA-256 of a download from the update feed, checked before install.
+sha2 = "0.10"
 
 [profile.dev]
 opt-level = 1

@@ -131,7 +131,7 @@ other; restart it to run the new version.
 | Call | Body |
 |---|---|
 | `POST /api/apps` | `{"repo": "owner/repo"}` (or a GitHub URL) — detected like the ＋ button; or `{"source": {...}}` for a full entry |
-| `PATCH /api/apps/{id}` | any of `name`, `description`, `kind` (`bin`/`appimage`/`deb`/`tar`), `package`, `install_path`, `repo` / `url` / `path` (the origin), `auto_update`, `cli` |
+| `PATCH /api/apps/{id}` | any of `name`, `description`, `kind` (`bin`/`appimage`/`deb`/`tar`), `package`, `install_path`, `repo` / `url` / `path` / `appupdates` (a feed slug; the origin), `auto_update`, `cli` |
 | `DELETE /api/apps/{id}` | removes it from the list; does **not** uninstall it |
 
 A full `source`:
